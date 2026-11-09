@@ -145,27 +145,24 @@ SHA256(salt + message[4] + message[7] + message[20] + CLI_VERSION).slice(0, 3)
 
 The salt is hardcoded in Claude Code's source. This changes per conversation because the user's message text changes.
 
-## OpenCode v2 compatibility
+## OpenCode compatibility
 
-OpenCode 2.0 loads plugins through a new contract (`id` + `setup()`), and V1
-hooks never run there — the plugin fails with *"Plugin must export a default
-definition with an id and an effect or setup function"*. This package supports
-both generations from one entrypoint:
+This package targets OpenCode ≥ 2.0, which loads plugins through `id` +
+`setup()`. The bridge registers an OAuth method override on the built-in
+`anthropic` integration (authorize + layered refresh, so `claude login` keeps
+auto-syncing) and rewrites requests through the `http.request` /
+`http.response` hooks. No model injection: the catalog already lists Claude
+models, and a stored OAuth credential activates the provider. Reconnect via
+`/connect` → Anthropic if needed.
 
-- **OpenCode ≥ 2.0** — uses `setup()`. The bridge registers an OAuth method
-  override on the built-in `anthropic` integration (authorize + layered
-  refresh, so `claude login` keeps auto-syncing) and rewrites requests through
-  the `http.request` / `http.response` hooks. No model injection: the v2
-  catalog already lists Claude models, and a stored OAuth credential
-  activates the provider. Reconnect via `/connect` → Anthropic if needed.
-- **OpenCode 1.18 – 1.x** — uses the V1 `server()` implementation as before.
+Older OpenCode versions are no longer supported by `main`:
 
-OpenCode < 1.18 is not supported by `main` (the `{ id, server }` entrypoint
-shape requires 1.18.29); use the 1.10.x releases there.
+- **OpenCode 1.18 – 1.x** — use the 1.11.x releases.
+- **OpenCode < 1.18** — use the 1.10.x releases.
 
 ## Requirements
 
-- [OpenCode](https://opencode.ai) v1.18.29+ (v2 supported)
+- [OpenCode](https://opencode.ai) v2.0+
 - For OAuth: [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (`claude login`)
 - macOS (Keychain) or Linux (`~/.claude/.credentials.json` fallback)
 - For API key: just configure a `provider` with `apiKey` in your OpenCode config as usual

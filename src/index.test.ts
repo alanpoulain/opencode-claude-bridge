@@ -1227,14 +1227,11 @@ describe("rewriteSystemBlocksForModel", () => {
 });
 
 describe("plugin module shape", () => {
-  it("default-exports { id, setup, server } so opencode's loader recognises it", () => {
+  it("default-exports { id, setup } so opencode's loader recognises it", () => {
     // A bare function default export sends opencode down its legacy path, where
     // it calls every named export of this module as a plugin factory — which
     // crashes on the helpers above and takes the whole plugin down with it.
-    // `server` keeps the V1 implementation on opencode >= 1.18; `setup` adds
-    // opencode >= 2, which ignores `server` and never runs V1 hooks.
     assert.equal(typeof pluginModule, "object");
-    assert.equal(typeof pluginModule.server, "function");
     assert.equal(typeof pluginModule.setup, "function");
   });
 
