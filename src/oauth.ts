@@ -284,38 +284,69 @@ export function createAuthorizationRequest(
   return { url: `${AUTHORIZE_URL}?${params}`, verifier, state };
 }
 
-export function parseAuthCode(raw: string): string {
-  let code = raw.trim();
+export function parseAuthCode(raw: string): { code: string; state?: string } {
+  let text = raw.trim();
+  let state: string | undefined;
 
-  if (code.includes("#")) {
-    code = code.split("#")[0];
-  }
-
-  if (code.includes("?")) {
+  // Handle URL form: http://localhost:PORT/callback?code=...&state=...
+  if (text.includes("?")) {
     try {
-      const url = new URL(code);
-      code = url.searchParams.get("code") || code;
+      const url = new URL(text);
+      const c = url.searchParams.get("code");
+      const s = url.searchParams.get("state");
+      if (c) text = c;
+      if (s) state = s;
     } catch {
-      const match = code.match(/[?&]code=([^&#]+)/);
-      if (match) code = match[1];
+      const codeMatch = text.match(/[?&]code=([^&#]+)/);
+      const stateMatch = text.match(/[?&]state=([^&#]+)/);
+      if (codeMatch) text = codeMatch[1];
+      if (stateMatch) state = stateMatch[1];
     }
   }
 
-  return code.trim();
+  // Handle code#state form (as provided by Claude's manual copy page)
+  if (text.includes("#")) {
+    const parts = text.split("#");
+    text = parts[0];
+    if (parts[1]) state = parts[1];
+  }
+
+  return { code: text.trim(), state };
 }
 
 export function exchangeCodeForTokens(
   code: string,
   verifier: string,
-  redirectUri?: string,
+  options?: {
+    redirectUri?: string;
+    state?: string;
+  },
 ): OAuthTokens {
-  const { status, body } = curlPost({
+  // If the raw code was passed directly with a #state fragment
+  let resolvedCode = code;
+  let resolvedState = options?.state;
+
+  if (resolvedCode.includes("#")) {
+    const parsed = parseAuthCode(resolvedCode);
+    resolvedCode = parsed.code;
+    if (parsed.state) {
+      resolvedState = parsed.state;
+    }
+  }
+
+  const payload: Record<string, string> = {
     grant_type: "authorization_code",
-    code,
-    code_verifier: verifier,
+    code: resolvedCode,
+    redirect_uri: options?.redirectUri || MANUAL_REDIRECT_URL,
     client_id: CLIENT_ID,
-    redirect_uri: redirectUri || MANUAL_REDIRECT_URL,
-  });
+    code_verifier: verifier,
+  };
+
+  if (resolvedState) {
+    payload.state = resolvedState;
+  }
+
+  const { status, body } = curlPost(payload);
   return parseTokenResponse(status, body, "Token exchange");
 }
 

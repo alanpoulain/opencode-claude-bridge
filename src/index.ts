@@ -25,6 +25,7 @@ import {
   CLEAR_THINKING_TYPE,
   SESSION_ID,
   PLUGIN_ID,
+  MANUAL_REDIRECT_URL,
 } from "./constants.js";
 import {
   getClaudeTools,
@@ -1084,7 +1085,7 @@ const OpenCodeClaudeBridge = async ({ client }: { client: PluginClient }) => {
             }
 
             if (callbackServer) {
-              const { url, manualUrl, verifier, port } = callbackServer;
+              const { url, manualUrl, verifier, state, port } = callbackServer;
               const redirectUri = `http://localhost:${port}/callback`;
 
               // Best-effort browser open
@@ -1115,21 +1116,27 @@ const OpenCodeClaudeBridge = async ({ client }: { client: PluginClient }) => {
 
                     if (autoCode) {
                       // Auto-flow captured the code via localhost redirect
-                      const tokens = exchangeCodeForTokens(autoCode, verifier, redirectUri);
+                      const tokens = exchangeCodeForTokens(autoCode, verifier, {
+                        redirectUri,
+                        state,
+                      });
                       await storeAuth(client, tokens);
                       callbackServer?.close();
                       return { type: "success" as const, ...tokens };
                     }
 
-                    const code = parseAuthCode(manualInput);
-                    if (!code) {
+                    const parsed = parseAuthCode(manualInput);
+                    if (!parsed.code) {
                       console.error("[opencode-oauth] No authorization code received");
                       callbackServer?.close();
                       return { type: "failed" as const };
                     }
 
                     // Manual flow — redirect_uri defaults to MANUAL_REDIRECT_URL
-                    const tokens = exchangeCodeForTokens(code, verifier);
+                    const tokens = exchangeCodeForTokens(parsed.code, verifier, {
+                      redirectUri: MANUAL_REDIRECT_URL,
+                      state: parsed.state || state,
+                    });
                     await storeAuth(client, tokens);
                     callbackServer?.close();
                     return { type: "success" as const, ...tokens };
@@ -1144,7 +1151,7 @@ const OpenCodeClaudeBridge = async ({ client }: { client: PluginClient }) => {
 
             // Fallback: no callback server — use manual redirect URL flow only.
             // This is the path for environments where we can't bind localhost.
-            const { url, verifier } = createAuthorizationRequest();
+            const { url, verifier, state } = createAuthorizationRequest();
 
             openBrowser(url);
 
@@ -1155,7 +1162,11 @@ const OpenCodeClaudeBridge = async ({ client }: { client: PluginClient }) => {
               callback: async (code: string) => {
                 try {
                   // redirect_uri defaults to MANUAL_REDIRECT_URL in exchangeCodeForTokens
-                  const tokens = exchangeCodeForTokens(parseAuthCode(code), verifier);
+                  const parsed = parseAuthCode(code);
+                  const tokens = exchangeCodeForTokens(parsed.code, verifier, {
+                    redirectUri: MANUAL_REDIRECT_URL,
+                    state: parsed.state || state,
+                  });
                   await storeAuth(client, tokens);
                   return { type: "success" as const, ...tokens };
                 } catch (err) {
@@ -1392,7 +1403,7 @@ const OpenCodeClaudeBridgeV2 = {
           }
 
           if (callbackServer) {
-            const { url, manualUrl, verifier, port } = callbackServer;
+            const { url, manualUrl, verifier, state, port } = callbackServer;
             const redirectUri = `http://localhost:${port}/callback`;
             // Best-effort browser open
             openBrowser(url);
@@ -1416,17 +1427,23 @@ const OpenCodeClaudeBridgeV2 = {
                   }
                   if (autoCode) {
                     // Auto-flow captured the code via localhost redirect
-                    const tokens = exchangeCodeForTokens(autoCode, verifier, redirectUri);
+                    const tokens = exchangeCodeForTokens(autoCode, verifier, {
+                      redirectUri,
+                      state,
+                    });
                     callbackServer?.close();
                     return toOAuthCredential(tokens);
                   }
-                  const code = parseAuthCode(manualInput);
-                  if (!code) {
+                  const parsed = parseAuthCode(manualInput);
+                  if (!parsed.code) {
                     console.error("[opencode-oauth] No authorization code received");
                     throw new Error("No authorization code received");
                   }
                   // Manual flow — redirect_uri defaults to MANUAL_REDIRECT_URL
-                  const tokens = exchangeCodeForTokens(code, verifier);
+                  const tokens = exchangeCodeForTokens(parsed.code, verifier, {
+                    redirectUri: MANUAL_REDIRECT_URL,
+                    state: parsed.state || state,
+                  });
                   callbackServer?.close();
                   return toOAuthCredential(tokens);
                 } catch (err) {
@@ -1439,14 +1456,20 @@ const OpenCodeClaudeBridgeV2 = {
 
           // Fallback: no callback server — use the manual redirect URL flow
           // only (environments where we can't bind localhost).
-          const { url, verifier } = createAuthorizationRequest();
+          const { url, verifier, state } = createAuthorizationRequest();
           openBrowser(url);
           return {
             url,
             instructions: `Opening browser for OAuth...\n\nAfter authorizing, you'll see a code — paste it below:\n${url}`,
             mode: "code",
-            callback: async (code: string) =>
-              toOAuthCredential(exchangeCodeForTokens(parseAuthCode(code), verifier)),
+            callback: async (code: string) => {
+                const parsed = parseAuthCode(code);
+                const tokens = exchangeCodeForTokens(parsed.code, verifier, {
+                  redirectUri: MANUAL_REDIRECT_URL,
+                  state: parsed.state || state,
+                });
+                return toOAuthCredential(tokens);
+              },
           };
         },
         async refresh(credential) {
