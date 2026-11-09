@@ -120,19 +120,35 @@ export function extractOAuthErrorDetail(body: string): string {
   return body.trim();
 }
 
-function parseTokenResponse(status: number, body: string, label: string): OAuthTokens {
+/**
+ * `currentRefreshToken` is kept when the endpoint doesn't rotate the refresh
+ * token, so the persisted credential never loses it.
+ */
+export function parseTokenResponse(
+  status: number,
+  body: string,
+  label: string,
+  currentRefreshToken?: string,
+): OAuthTokens {
   if (status !== 200) {
     throw new Error(`${label} failed (${status}): ${extractOAuthErrorDetail(body)}`);
   }
   const data = JSON.parse(body) as {
-    access_token: string;
-    refresh_token: string;
+    access_token?: string;
+    refresh_token?: string;
     expires_in: number;
   };
+  if (!data.access_token) {
+    throw new Error(`${label} failed: response has no access_token`);
+  }
+  const refresh = data.refresh_token || currentRefreshToken;
+  if (!refresh) {
+    throw new Error(`${label} failed: response has no refresh_token`);
+  }
   return {
     access: data.access_token,
-    refresh: data.refresh_token,
-    expires: Date.now() + data.expires_in * 1000,
+    refresh,
+    expires: Math.trunc(Date.now() + data.expires_in * 1000),
   };
 }
 
@@ -356,5 +372,5 @@ export function refreshTokens(refreshToken: string): OAuthTokens {
     refresh_token: refreshToken,
     client_id: CLIENT_ID,
   });
-  return parseTokenResponse(status, body, "Token refresh");
+  return parseTokenResponse(status, body, "Token refresh", refreshToken);
 }

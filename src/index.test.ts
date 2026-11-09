@@ -17,7 +17,7 @@ import {
   AGENT_TYPE_OPENCODE_TO_CLAUDE,
   shouldUseClaudeToolSchemas,
 } from "./claude-tools.js";
-import { extractOAuthErrorDetail } from "./oauth.js";
+import { extractOAuthErrorDetail, parseTokenResponse } from "./oauth.js";
 import { selectClaudeCredentials } from "./keychain.js";
 import {
   default as pluginModule,
@@ -1537,6 +1537,44 @@ describe("http hooks: per-request OAuth tracking", () => {
       const original = sse();
       assert.equal(await hooks.response(new Request(url, { method: "POST" }), original), original);
     });
+  });
+});
+
+describe("parseTokenResponse", () => {
+  const ok = (data: Record<string, unknown>) => JSON.stringify(data);
+
+  it("keeps the current refresh token when the endpoint doesn't rotate it", () => {
+    const tokens = parseTokenResponse(200, ok({ access_token: "a", expires_in: 3600 }), "Token refresh", "old-r");
+    assert.equal(tokens.refresh, "old-r");
+  });
+
+  it("prefers a rotated refresh token", () => {
+    const tokens = parseTokenResponse(
+      200,
+      ok({ access_token: "a", refresh_token: "new-r", expires_in: 3600 }),
+      "Token refresh",
+      "old-r",
+    );
+    assert.equal(tokens.refresh, "new-r");
+  });
+
+  it("returns an integer expiry", () => {
+    const tokens = parseTokenResponse(200, ok({ access_token: "a", refresh_token: "r", expires_in: 0.0005 }), "x");
+    assert.ok(Number.isInteger(tokens.expires));
+  });
+
+  it("rejects a response without an access token", () => {
+    assert.throws(
+      () => parseTokenResponse(200, ok({ refresh_token: "r", expires_in: 3600 }), "Token refresh"),
+      /no access_token/,
+    );
+  });
+
+  it("rejects a response without any refresh token", () => {
+    assert.throws(
+      () => parseTokenResponse(200, ok({ access_token: "a", expires_in: 3600 }), "Token exchange"),
+      /no refresh_token/,
+    );
   });
 });
 

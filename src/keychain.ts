@@ -112,7 +112,9 @@ export function getClaudeTokens(options: GetClaudeTokensOptions = {}): OAuthToke
   const creds = readClaudeCredentials();
   if (!creds?.claudeAiOauth) return null;
 
-  const { accessToken, refreshToken, expiresAt } = creds.claudeAiOauth;
+  const { accessToken, refreshToken } = creds.claudeAiOauth;
+  // The CLI can store fractional milliseconds; credential expiries are integers.
+  const expiresAt = Math.trunc(creds.claudeAiOauth.expiresAt);
 
   // Token still valid (60s buffer)
   if (expiresAt > Date.now() + 60_000) {

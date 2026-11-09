@@ -905,7 +905,7 @@ const OpenCodeClaudeBridge = {
       methodID: "oauth",
       access: tokens.access,
       refresh: tokens.refresh,
-      expires: tokens.expires,
+      expires: Math.trunc(tokens.expires),
     });
 
     const isAnthropicApiUrl = (url: string): boolean => {
