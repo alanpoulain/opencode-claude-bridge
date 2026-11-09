@@ -23,7 +23,7 @@ function detectClaudeVersion(): string {
       return parsed.version;
     }
   } catch {}
-  return "2.1.98";
+  return "2.1.319";
 }
 
 /**
