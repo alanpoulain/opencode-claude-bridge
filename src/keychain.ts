@@ -68,6 +68,33 @@ export function selectClaudeCredentials(
   return null;
 }
 
+/**
+ * Human-readable reason for a failed `security find-generic-password`, or null
+ * when the item simply doesn't exist (exit 44), which is not an error.
+ */
+export function describeKeychainError(err: unknown): string | null {
+  const e = err as { status?: number | null; code?: string; killed?: boolean; signal?: string | null };
+  if (e?.status === 44) return null;
+  if (e?.killed || e?.code === "ETIMEDOUT" || e?.signal === "SIGTERM") {
+    return "macOS Keychain read timed out; try restarting Keychain Access";
+  }
+  if (e?.status === 36) {
+    return "macOS Keychain is locked; unlock it or run `security unlock-keychain ~/Library/Keychains/login.keychain-db`";
+  }
+  if (e?.status === 128) {
+    return "macOS Keychain access was denied; allow access when macOS prompts";
+  }
+  if (e?.code === "ENOENT") return "the `security` tool was not found";
+  return `macOS Keychain read failed (exit ${e?.status ?? "unknown"})`;
+}
+
+let lastKeychainError: string | null = null;
+
+/** Why the most recent credential read couldn't use the Keychain, if it failed for a reason other than "not found". */
+export function getLastKeychainError(): string | null {
+  return lastKeychainError;
+}
+
 /** Raw contents of one Keychain item, optionally scoped to an account. */
 function readKeychainRaw(service: string, account?: string): string | null {
   const args = ["find-generic-password", "-s", service];
@@ -82,8 +109,10 @@ function readKeychainRaw(service: string, account?: string): string | null {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     return raw || null;
-  } catch {
-    // Item missing or Keychain unavailable.
+  } catch (err) {
+    // Missing item is normal; anything else is remembered so callers can
+    // explain why the Keychain didn't yield credentials.
+    lastKeychainError = describeKeychainError(err) ?? lastKeychainError;
     return null;
   }
 }
@@ -117,6 +146,7 @@ export function readClaudeCredentialsWithSource():
   | { credentials: KeychainCredentials; source: CredentialSource }
   | null {
   if (process.platform === "darwin") {
+    lastKeychainError = null;
     const account = currentUsername();
     for (const service of keychainServiceNames()) {
       // Scoped lookup first (Claude Code stores under the current account),
@@ -126,6 +156,7 @@ export function readClaudeCredentialsWithSource():
       const unscoped = readKeychainItem(service);
       const found = selectClaudeCredentials([scoped, unscoped]);
       if (found) {
+        lastKeychainError = null;
         return {
           credentials: found,
           source: {
@@ -144,6 +175,7 @@ export function readClaudeCredentialsWithSource():
   try {
     const path = credentialsFilePath();
     const credentials = JSON.parse(readFileSync(path, "utf8")) as KeychainCredentials;
+    lastKeychainError = null;
     return { credentials, source: { kind: "file", path } };
   } catch {
     return null;

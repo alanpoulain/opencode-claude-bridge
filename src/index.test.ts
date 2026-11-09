@@ -22,6 +22,7 @@ import {
   buildKeychainWriteCommand,
   claudeConfigDir,
   credentialsFilePath,
+  describeKeychainError,
   keychainServiceNames,
   readClaudeCliTokens,
   selectClaudeCredentials,
@@ -42,6 +43,7 @@ import {
   refreshCredentialLayered,
   replaceRevokedToken,
   retryUnauthorizedWithCliToken,
+  withKeychainHint,
   resolveOAuthAccessToken,
   rewriteSystemBlocksForModel,
   shouldInjectClaudeTools,
@@ -1546,6 +1548,18 @@ describe("http hooks: per-request OAuth tracking", () => {
     });
   });
 
+  it("sends a fresh x-client-request-id per request", async () => {
+    await withNetworkDisabled(async () => {
+      const hooks = await setupHooks();
+      const send = () =>
+        hooks.request(new Request(url, { method: "POST", headers: { authorization: "Bearer tok" }, body }));
+      const first = (await send()).headers.get("x-client-request-id");
+      const second = (await send()).headers.get("x-client-request-id");
+      assert.match(first ?? "", /^[0-9a-f-]{36}$/);
+      assert.notEqual(first, second);
+    });
+  });
+
   it("ignores a request it never rewrote", async () => {
     await withNetworkDisabled(async () => {
       const hooks = await setupHooks();
@@ -1659,6 +1673,29 @@ describe("refreshCredentialLayered", () => {
     const result = refreshCredentialLayered({ refresh: "shared-r" }, h.deps);
     assert.equal(result?.refresh, "new-r-shared-r");
     assert.equal(h.warnings.length, 1);
+  });
+});
+
+describe("Keychain error reporting", () => {
+  it("treats a missing item as no error", () => {
+    assert.equal(describeKeychainError({ status: 44 }), null);
+  });
+
+  it("explains locked, denied, timed-out and other failures", () => {
+    assert.match(describeKeychainError({ status: 36 })!, /locked/);
+    assert.match(describeKeychainError({ status: 128 })!, /denied/);
+    assert.match(describeKeychainError({ killed: true, signal: "SIGTERM" })!, /timed out/);
+    assert.match(describeKeychainError({ code: "ETIMEDOUT" })!, /timed out/);
+    assert.match(describeKeychainError({ code: "ENOENT" })!, /security/);
+    assert.match(describeKeychainError({ status: 51 })!, /exit 51/);
+  });
+
+  it("withKeychainHint appends the reason only when there is one", () => {
+    assert.equal(withKeychainHint("Refresh failed", null), "Refresh failed");
+    assert.equal(
+      withKeychainHint("Refresh failed", "macOS Keychain is locked"),
+      "Refresh failed (Claude CLI credentials: macOS Keychain is locked)",
+    );
   });
 });
 

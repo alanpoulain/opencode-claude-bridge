@@ -12,6 +12,7 @@ import {
 import type { OAuthTokens } from "./oauth.js";
 import {
   getClaudeTokens,
+  getLastKeychainError,
   readClaudeCliTokens,
   writeBackClaudeCredentials,
 } from "./keychain.js";
@@ -616,6 +617,11 @@ export async function resolveOAuthAccessToken(
   return null;
 }
 
+/** Append why the Keychain was unusable, when that's the likely cause. */
+export function withKeychainHint(message: string, keychainError = getLastKeychainError()): string {
+  return keychainError ? `${message} (Claude CLI credentials: ${keychainError})` : message;
+}
+
 function bearerOf(request: Request): string | undefined {
   const auth = request.headers.get("authorization");
   return auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
@@ -1091,6 +1097,10 @@ const OpenCodeClaudeBridge = {
               };
             }
           } catch {}
+          const keychainError = getLastKeychainError();
+          const keychainNote = keychainError
+            ? `Claude CLI credentials unavailable: ${keychainError}.\n\n`
+            : "";
 
           // Start a local HTTP server to capture the OAuth redirect. This
           // gives us an ephemeral port so the redirect_uri is
@@ -1119,7 +1129,7 @@ const OpenCodeClaudeBridge = {
             }).catch(() => {});
             return {
               url,
-              instructions: `Opening browser for OAuth...\n\nIf the browser redirected back successfully, just press Enter.\nOtherwise, open this URL and paste the code:\n${manualUrl}`,
+              instructions: `${keychainNote}Opening browser for OAuth...\n\nIf the browser redirected back successfully, just press Enter.\nOtherwise, open this URL and paste the code:\n${manualUrl}`,
               mode: "code",
               callback: async (manualInput: string) => {
                 try {
@@ -1162,7 +1172,7 @@ const OpenCodeClaudeBridge = {
           openBrowser(url);
           return {
             url,
-            instructions: `Opening browser for OAuth...\n\nAfter authorizing, you'll see a code — paste it below:\n${url}`,
+            instructions: `${keychainNote}Opening browser for OAuth...\n\nAfter authorizing, you'll see a code — paste it below:\n${url}`,
             mode: "code",
             callback: async (code: string) => {
                 const parsed = parseAuthCode(code);
@@ -1179,15 +1189,22 @@ const OpenCodeClaudeBridge = {
           // opencode awaits it and persists the resolved credential. Never
           // refresh outside this callback — Claude refresh tokens are
           // single-use; spending the CLI's token writes the rotation back.
-          const fresh = refreshCredentialLayered(credential, {
-            readCli: readClaudeCliTokens,
-            refresh: refreshTokens,
-            writeBack: writeBackClaudeCredentials,
-            warn: (message) => console.error(message),
-          });
+          let fresh: OAuthTokens | null;
+          try {
+            fresh = refreshCredentialLayered(credential, {
+              readCli: readClaudeCliTokens,
+              refresh: refreshTokens,
+              writeBack: writeBackClaudeCredentials,
+              warn: (message) => console.error(message),
+            });
+          } catch (err) {
+            throw new Error(withKeychainHint(err instanceof Error ? err.message : String(err)));
+          }
           if (!fresh) {
             throw new Error(
-              "All Claude OAuth refresh layers failed. Run `claude login` or reconnect 'Claude Pro / Max (OAuth)'.",
+              withKeychainHint(
+                "All Claude OAuth refresh layers failed. Run `claude login` or reconnect 'Claude Pro / Max (OAuth)'.",
+              ),
             );
           }
           return toOAuthCredential(fresh);
@@ -1230,6 +1247,7 @@ const OpenCodeClaudeBridge = {
           headers.set("user-agent", getUserAgent());
           headers.set("x-app", "cli");
           headers.set("x-claude-code-session-id", requestState.sessionId);
+          headers.set("x-client-request-id", randomUUID());
           headers.set("anthropic-version", ANTHROPIC_VERSION);
           headers.set("anthropic-dangerous-direct-browser-access", "true");
           for (const [k, v] of Object.entries(STAINLESS_HEADERS)) headers.set(k, v);
