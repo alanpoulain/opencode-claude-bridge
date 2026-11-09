@@ -12,12 +12,10 @@ import {
 import { getClaudeTokens, readClaudeCredentials } from "./keychain.js";
 import {
   BETA_FLAGS,
-  CLI_VERSION,
   OAUTH_BETA_FLAG,
   ANTHROPIC_VERSION,
   BILLING_CCH,
   STAINLESS_HEADERS,
-  USER_AGENT,
   PROFILE_URL,
   CLI_BUILD_ID,
   ENTRYPOINT,
@@ -28,6 +26,7 @@ import {
   PLUGIN_ID,
   MANUAL_REDIRECT_URL,
 } from "./constants.js";
+import { getCliVersion, getUserAgent, refreshCliVersion } from "./cli-version.js";
 import {
   getClaudeTools,
   translateArgsOpencodeToClaude,
@@ -457,7 +456,7 @@ function buildBillingHeader(
     || cachedClaudePromptCache?.billing?.ccVersionSuffix
     || CLI_BUILD_ID;
   const ccVersion = cachedClaudePromptCache?.billing?.ccVersion
-    || `${CLI_VERSION}.${suffix}`;
+    || `${getCliVersion()}.${suffix}`;
   const ccEntrypoint = cachedClaudePromptCache?.billing?.ccEntrypoint || ENTRYPOINT;
   return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${ccEntrypoint}; cch=${cch};`;
 }
@@ -472,7 +471,7 @@ async function fetchOAuthProfile(accessToken: string): Promise<OAuthProfile | nu
         headers: {
           authorization: `Bearer ${accessToken}`,
           "content-type": "application/json",
-          "user-agent": USER_AGENT,
+          "user-agent": getUserAgent(),
           "anthropic-beta": OAUTH_BETA_FLAG,
         },
       });
@@ -823,6 +822,8 @@ type PluginContext = {
 
 const OpenCodeClaudeBridge = {
   async setup(ctx: PluginContext) {
+    // Not awaited: a slow registry must never delay startup.
+    void refreshCliVersion();
     const cachedClaudePromptCache = readCachedClaudePromptCache();
     const requestState: AnthropicRequestState = {
       sessionId: SESSION_ID || randomUUID(),
@@ -1044,7 +1045,7 @@ const OpenCodeClaudeBridge = {
           headers.delete("x-session-affinity");
           headers.delete("x-session-id");
           if (!headers.has("accept")) headers.set("accept", "application/json");
-          headers.set("user-agent", USER_AGENT);
+          headers.set("user-agent", getUserAgent());
           headers.set("x-app", "cli");
           headers.set("x-claude-code-session-id", requestState.sessionId);
           headers.set("anthropic-version", ANTHROPIC_VERSION);

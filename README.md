@@ -176,7 +176,9 @@ All OAuth and header parameters can be overridden via environment variables:
 | `ANTHROPIC_CLIENT_ID` | `9d1c250a-...` | OAuth client ID |
 | `ANTHROPIC_TOKEN_URL` | `https://platform.claude.com/v1/oauth/token` | Token endpoint |
 | `ANTHROPIC_AUTHORIZE_URL` | `https://claude.ai/oauth/authorize` | Authorization endpoint |
-| `ANTHROPIC_CLI_VERSION` | Auto-detected from `claude --version` or `2.1.98` | Claude CLI version string |
+| `ANTHROPIC_CLI_VERSION` | `claude --version`, else the npm `stable` tag (cached 24h in `~/.cache/opencode-claude-bridge/cli-version.json`), else `2.1.319` | Claude CLI version string |
+| `ANTHROPIC_CLI_VERSION_TAG` | `stable` | npm dist-tag of `@anthropic-ai/claude-code` to follow (`stable`, `latest`, `next`) |
+| `ANTHROPIC_CLI_VERSION_URL` | `https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags` | Registry endpoint for the version lookup |
 | `ANTHROPIC_CLI_BUILD_ID` | `835` | Build ID for headers |
 | `ANTHROPIC_ENTRYPOINT` | `sdk-cli` | Entrypoint value for billing |
 | `ANTHROPIC_SDK_VERSION` | `0.94.0` | Stainless SDK version |
@@ -187,7 +189,7 @@ All OAuth and header parameters can be overridden via environment variables:
 | `ANTHROPIC_THINKING_DISPLAY` | `summarized` | `thinking.display` sent when the request doesn't set one (`omitted` hides thinking text) |
 | `ANTHROPIC_SESSION_ID` | (generated) | Override session ID |
 
-Most users won't need to change these — the bridge auto-detects the installed Claude CLI version and uses matching defaults.
+Most users won't need to change these — the bridge uses the installed Claude CLI version, or the current published one when the CLI isn't installed.
 
 ## Local validation
 

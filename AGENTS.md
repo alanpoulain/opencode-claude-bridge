@@ -23,6 +23,16 @@
   thinking is version-based (`supportsAdaptiveThinking`), not a name list:
   all 5.x families including Haiku get it; Haiku 4.x and Sonnet < 4.6 don't.
 
+- CLI version priority: `ANTHROPIC_CLI_VERSION` → local `claude --version` /
+  `~/.claude/.credentials.json` → npm `stable` dist-tag (24h cache in
+  `~/.cache/opencode-claude-bridge/cli-version.json`, refreshed non-blocking
+  from `setup()`) → hard-coded fallback. That logic lives in
+  `src/cli-version.ts`; `src/constants.ts` stays plain values only (no I/O,
+  no mutable state). Read it via `getCliVersion()` / `getUserAgent()` at call
+  time, never capture it in a module-level const.
+  `CLI_BUILD_ID`, `BETA_FLAGS` and the Stainless SDK version are NOT
+  auto-updated — npm metadata doesn't expose them.
+
 ## Testing
 
 - `npm test` builds with `tsc` and runs only `dist/index.test.js`.

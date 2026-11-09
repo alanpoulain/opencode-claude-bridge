@@ -33,6 +33,10 @@ import {
   stripSystemCacheControl,
 } from "./index.js";
 import { createSseProcessor, parseSseEvent, buildSseEvent } from "./stream.js";
+import { fetchCliVersion, parseDistTagsVersion } from "./cli-version.js";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1341,7 +1345,17 @@ describe("plugin module shape", () => {
         },
       },
     };
-    const cleanup = await (pluginModule.setup as (c: unknown) => Promise<unknown>)(ctx);
+    // setup() kicks off a background CLI-version refresh; keep it off the network.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as typeof globalThis.fetch;
+    let cleanup: unknown;
+    try {
+      cleanup = await (pluginModule.setup as (c: unknown) => Promise<unknown>)(ctx);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
 
     const registration = methodUpdate.capture as Record<string, unknown>;
     assert.equal(registration.integrationID, "anthropic");
@@ -1363,6 +1377,104 @@ describe("plugin module shape", () => {
       ["context:anthropic", "http.request:anthropic", "http.response:anthropic"],
     );
     assert.equal(typeof cleanup, "function");
+  });
+});
+
+describe("CLI version lookup", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const distTags = { stable: "2.1.311", latest: "2.1.319", next: "2.1.319" };
+  const jsonFetch = (body: unknown, ok = true) => {
+    let calls = 0;
+    const fn = (async () => {
+      calls++;
+      return { ok, json: async () => body } as Response;
+    }) as typeof globalThis.fetch;
+    return { fn, calls: () => calls };
+  };
+  const withTempCache = async (run: (cachePath: string) => Promise<void>) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocb-version-"));
+    try {
+      await run(join(dir, "nested", "cli-version.json"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("parseDistTagsVersion picks the requested tag and rejects junk", () => {
+    assert.equal(parseDistTagsVersion(distTags, "stable"), "2.1.311");
+    assert.equal(parseDistTagsVersion(distTags, "latest"), "2.1.319");
+    assert.equal(parseDistTagsVersion({ stable: "not-a-version" }, "stable"), null);
+    assert.equal(parseDistTagsVersion(null, "stable"), null);
+  });
+
+  it("fetches the stable tag and writes the cache", async () => {
+    await withTempCache(async (cachePath) => {
+      const f = jsonFetch(distTags);
+      const version = await fetchCliVersion({ fetch: f.fn, cachePath, now: 1000, tag: "stable" });
+      assert.equal(version, "2.1.311");
+      assert.deepEqual(JSON.parse(readFileSync(cachePath, "utf8")), {
+        version: "2.1.311",
+        fetchedAt: 1000,
+      });
+    });
+  });
+
+  it("serves a fresh cache without touching the network", async () => {
+    await withTempCache(async (cachePath) => {
+      await fetchCliVersion({ fetch: jsonFetch(distTags).fn, cachePath, now: 0, tag: "stable" });
+      const f = jsonFetch({ stable: "9.9.9" });
+      const version = await fetchCliVersion({ fetch: f.fn, cachePath, now: DAY - 1, tag: "stable" });
+      assert.equal(version, "2.1.311");
+      assert.equal(f.calls(), 0);
+    });
+  });
+
+  it("refetches once the cache is stale", async () => {
+    await withTempCache(async (cachePath) => {
+      await fetchCliVersion({ fetch: jsonFetch(distTags).fn, cachePath, now: 0, tag: "stable" });
+      const f = jsonFetch({ stable: "2.1.400" });
+      const version = await fetchCliVersion({ fetch: f.fn, cachePath, now: DAY + 1, tag: "stable" });
+      assert.equal(version, "2.1.400");
+      assert.equal(f.calls(), 1);
+    });
+  });
+
+  it("falls back to a stale cache when the registry fails", async () => {
+    await withTempCache(async (cachePath) => {
+      await fetchCliVersion({ fetch: jsonFetch(distTags).fn, cachePath, now: 0, tag: "stable" });
+      const failing = (async () => {
+        throw new Error("offline");
+      }) as typeof globalThis.fetch;
+      assert.equal(
+        await fetchCliVersion({ fetch: failing, cachePath, now: DAY * 2, tag: "stable" }),
+        "2.1.311",
+      );
+      assert.equal(
+        await fetchCliVersion({ fetch: jsonFetch({}, false).fn, cachePath, now: DAY * 2, tag: "stable" }),
+        "2.1.311",
+      );
+    });
+  });
+
+  it("returns null with no cache and a failing registry", async () => {
+    await withTempCache(async (cachePath) => {
+      const version = await fetchCliVersion({
+        fetch: jsonFetch({ stable: "garbage" }).fn,
+        cachePath,
+        now: 0,
+        tag: "stable",
+      });
+      assert.equal(version, null);
+    });
+  });
+
+  it("ignores a corrupt cache file", async () => {
+    await withTempCache(async (cachePath) => {
+      await fetchCliVersion({ fetch: jsonFetch(distTags).fn, cachePath, now: 0, tag: "stable" });
+      writeFileSync(cachePath, "{not json");
+      const version = await fetchCliVersion({ fetch: jsonFetch(distTags).fn, cachePath, now: 1, tag: "stable" });
+      assert.equal(version, "2.1.311");
+    });
   });
 });
 

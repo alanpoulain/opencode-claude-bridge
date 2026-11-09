@@ -1,30 +1,24 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-function detectClaudeVersion(): string {
-  // Try to read version from installed Claude CLI
-  try {
-    const version = execFileSync("claude", ["--version"], {
-      encoding: "utf8",
-      timeout: 3000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    const match = version.match(/^(\d+\.\d+\.\d+)/);
-    if (match) return match[1];
-  } catch {}
-  // Fallback to credentials file
-  try {
-    const credPath = join(homedir(), ".claude", ".credentials.json");
-    const raw = readFileSync(credPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (parsed.version && typeof parsed.version === "string") {
-      return parsed.version;
-    }
-  } catch {}
-  return "2.1.319";
-}
+export const FALLBACK_CLI_VERSION = "2.1.319";
+
+export const CLI_VERSION_URL =
+  process.env.ANTHROPIC_CLI_VERSION_URL ||
+  "https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags";
+
+// npm dist-tag to follow. "stable" trails "latest" by a few releases and is
+// what most real Claude Code installs report.
+export const CLI_VERSION_TAG = process.env.ANTHROPIC_CLI_VERSION_TAG || "stable";
+
+export const CLI_VERSION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+export const CLI_VERSION_FETCH_TIMEOUT_MS = 2000;
+
+export const CLI_VERSION_CACHE_PATH = join(
+  process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
+  "opencode-claude-bridge",
+  "cli-version.json",
+);
 
 /**
  * Identity opencode registers this plugin under. Required: opencode refuses to
@@ -60,9 +54,6 @@ export const SCOPES =
   process.env.ANTHROPIC_SCOPES ||
   "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
-export const CLI_VERSION =
-  process.env.ANTHROPIC_CLI_VERSION || detectClaudeVersion();
-
 export const CLI_BUILD_ID =
   process.env.ANTHROPIC_CLI_BUILD_ID || "835";
 
@@ -70,10 +61,6 @@ export const ENTRYPOINT =
   process.env.ANTHROPIC_ENTRYPOINT ||
   process.env.CLAUDE_CODE_ENTRYPOINT ||
   "sdk-cli";
-
-export const USER_AGENT =
-  process.env.ANTHROPIC_USER_AGENT ||
-  `claude-cli/${CLI_VERSION} (external, ${ENTRYPOINT})`;
 
 // Beta flags matching Claude Code 2.1.x (confirmed via request interception).
 // oauth-2025-04-20 is added separately only for OAuth auth.
