@@ -486,6 +486,49 @@ async function fetchOAuthProfile(accessToken: string): Promise<OAuthProfile | nu
   return pending;
 }
 
+/**
+ * Pick the OAuth access token for an Anthropic request, or null to pass the
+ * request through untouched. The Claude CLI token is a fallback only when
+ * nothing signals API-key auth: an `x-api-key` header or an active non-OAuth
+ * connection means the user chose an API key, and taking that request over
+ * would silently bill it to the subscription.
+ */
+export async function resolveOAuthAccessToken(
+  request: Request,
+  deps: {
+    getActiveCredential: () => Promise<
+      { type?: string; access?: string; expires?: number } | undefined
+    >;
+    getCliTokens: () => { access: string; expires: number } | null;
+  },
+): Promise<string | null> {
+  const bearer = request.headers?.get?.("authorization");
+  if (typeof bearer === "string" && bearer.startsWith("Bearer ") && bearer.length > 7) {
+    return bearer.slice(7);
+  }
+  if (request.headers?.get?.("x-api-key")) return null;
+
+  try {
+    const credential = await deps.getActiveCredential();
+    if (credential) {
+      if (credential.type !== "oauth") return null;
+      if (
+        credential.access &&
+        typeof credential.expires === "number" &&
+        credential.expires > Date.now()
+      ) {
+        return credential.access;
+      }
+    }
+  } catch {}
+
+  try {
+    const tokens = deps.getCliTokens();
+    if (tokens?.access && tokens.expires > Date.now()) return tokens.access;
+  } catch {}
+  return null;
+}
+
 // ── Request/response phases (used by the http.request / http.response
 // hooks) ───────────────────────────────────────────────────────────
 
@@ -862,31 +905,14 @@ const OpenCodeClaudeBridge = {
     // credential → Claude CLI keychain. Never rotates refresh tokens here:
     // Claude refresh tokens are single-use, so only the integration `refresh`
     // callback (whose result opencode persists) may rotate them.
-    async function resolveAccessToken(request: Request): Promise<string | null> {
-      const bearer = request.headers?.get?.("authorization");
-      if (typeof bearer === "string" && bearer.startsWith("Bearer ") && bearer.length > 7) {
-        return bearer.slice(7);
-      }
-      try {
-        const connection = await ctx.integration.connection.active("anthropic");
-        if (connection) {
-          const credential = await ctx.integration.connection.resolve(connection);
-          if (
-            credential?.type === "oauth" &&
-            credential.access &&
-            typeof credential.expires === "number" &&
-            credential.expires > Date.now()
-          ) {
-            return credential.access;
-          }
-        }
-      } catch {}
-      try {
-        const tokens = getClaudeTokens({ refreshExpired: false });
-        if (tokens?.access && tokens.expires > Date.now()) return tokens.access;
-      } catch {}
-      return null;
-    }
+    const resolveAccessToken = (request: Request): Promise<string | null> =>
+      resolveOAuthAccessToken(request, {
+        getActiveCredential: async () => {
+          const connection = await ctx.integration.connection.active("anthropic");
+          return connection ? ctx.integration.connection.resolve(connection) : undefined;
+        },
+        getCliTokens: () => getClaudeTokens({ refreshExpired: false }),
+      });
 
     // ── Auth: take over the native `oauth` method on the anthropic
     // integration so stored credentials refresh through the bridge's layered

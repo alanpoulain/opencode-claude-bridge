@@ -27,6 +27,7 @@ import {
   getInboundToolNameMapForActiveOpenCodeTools,
   mapOutboundToolName,
   mergeSystemBlocks,
+  resolveOAuthAccessToken,
   rewriteSystemBlocksForModel,
   shouldInjectClaudeTools,
   stripAssistantPrefillForClaude,
@@ -1377,6 +1378,84 @@ describe("plugin module shape", () => {
       ["context:anthropic", "http.request:anthropic", "http.response:anthropic"],
     );
     assert.equal(typeof cleanup, "function");
+  });
+});
+
+describe("resolveOAuthAccessToken", () => {
+  const future = () => Date.now() + 3_600_000;
+  const past = () => Date.now() - 1_000;
+  const request = (headers: Record<string, string> = {}) =>
+    new Request("https://api.anthropic.com/v1/messages", { method: "POST", headers });
+  const cli = () => ({ access: "cli-token", expires: future() });
+
+  it("uses the bearer token already on the request without any lookup", async () => {
+    const token = await resolveOAuthAccessToken(request({ authorization: "Bearer req-token" }), {
+      getActiveCredential: async () => {
+        throw new Error("must not be called");
+      },
+      getCliTokens: () => {
+        throw new Error("must not be called");
+      },
+    });
+    assert.equal(token, "req-token");
+  });
+
+  it("passes API-key requests through even when the Claude CLI is logged in", async () => {
+    const token = await resolveOAuthAccessToken(request({ "x-api-key": "sk-ant-api" }), {
+      getActiveCredential: async () => undefined,
+      getCliTokens: cli,
+    });
+    assert.equal(token, null);
+  });
+
+  it("passes through when the active connection is not OAuth", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => ({ type: "api" }),
+      getCliTokens: cli,
+    });
+    assert.equal(token, null);
+  });
+
+  it("uses a valid OAuth connection", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => ({ type: "oauth", access: "stored", expires: future() }),
+      getCliTokens: cli,
+    });
+    assert.equal(token, "stored");
+  });
+
+  it("falls back to the CLI token when the OAuth connection is expired", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => ({ type: "oauth", access: "stale", expires: past() }),
+      getCliTokens: cli,
+    });
+    assert.equal(token, "cli-token");
+  });
+
+  it("falls back to the CLI token when there is no connection", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => undefined,
+      getCliTokens: cli,
+    });
+    assert.equal(token, "cli-token");
+  });
+
+  it("falls back to the CLI token when the connection lookup throws", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => {
+        throw new Error("store unavailable");
+      },
+      getCliTokens: cli,
+    });
+    assert.equal(token, "cli-token");
+  });
+
+  it("returns null when the CLI token is expired too", async () => {
+    const token = await resolveOAuthAccessToken(request(), {
+      getActiveCredential: async () => undefined,
+      getCliTokens: () => ({ access: "old", expires: past() }),
+    });
+    assert.equal(token, null);
   });
 });
 

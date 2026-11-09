@@ -8,6 +8,9 @@
   1.11.x releases.
 - Never rotate Claude refresh tokens outside the integration `refresh`
   callback — they are single-use and only that callback's result is persisted.
+- `resolveOAuthAccessToken` only falls back to the Claude CLI token when
+  nothing signals API-key auth: an `x-api-key` header or an active non-OAuth
+  connection means passthrough, never an OAuth takeover.
 - `TOOL_NAME_MAP` (OpenCode → Claude) is the single source of truth for tool
   names; `INBOUND_TOOL_NAME_MAP` is derived from it.
 - Only OpenCode ≥ 2.2 tool schemas are supported: read/write/edit take `path`
