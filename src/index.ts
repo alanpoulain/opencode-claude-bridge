@@ -23,6 +23,7 @@ import {
   ENTRYPOINT,
   DEFAULT_EFFORT,
   CLEAR_THINKING_TYPE,
+  THINKING_DISPLAY,
   SESSION_ID,
   PLUGIN_ID,
   MANUAL_REDIRECT_URL,
@@ -513,6 +514,52 @@ function normalizeAnthropicApiUrl(rawUrl: string): string {
 }
 
 /**
+ * Whether the bridge should inject adaptive thinking (plus context
+ * management and effort) for a model. Haiku 4.x and Sonnet before 4.6
+ * reject the field; Opus 4.x, Sonnet ≥ 4.6 and every 5.x family (Opus,
+ * Sonnet, Haiku, Fable, Mythos) accept it.
+ */
+export function supportsAdaptiveThinking(model: unknown): boolean {
+  if (typeof model !== "string") return false;
+  // Minor is at most two digits so a date suffix (claude-opus-4-20250514)
+  // is not mistaken for it.
+  const m = model.toLowerCase().match(/claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)/);
+  if (!m) return false;
+  const family = m[1];
+  const major = Number(m[2]);
+  const minor = Number(m[3] ?? 0);
+  if (major >= 5) return true;
+  if (major !== 4) return false;
+  if (family === "opus") return true;
+  if (family === "sonnet") return minor >= 6;
+  return false;
+}
+
+/**
+ * Inject adaptive thinking for supported models, request readable thinking
+ * text (newer models omit it by default), and force temperature=1 when
+ * thinking is on. Returns whether the model supports adaptive thinking.
+ */
+export function applyThinkingConfig(parsed: any): boolean {
+  const supportsThinking = supportsAdaptiveThinking(parsed.model);
+  if (!parsed.thinking && supportsThinking) {
+    parsed.thinking = { type: "adaptive" };
+  }
+
+  const thinkingType = parsed.thinking?.type;
+  const thinkingOn = thinkingType === "enabled" || thinkingType === "adaptive";
+  if (thinkingOn && parsed.thinking.display === undefined && THINKING_DISPLAY) {
+    parsed.thinking.display = THINKING_DISPLAY;
+  }
+
+  // Anthropic requires temperature=1 when thinking is enabled/adaptive
+  if (thinkingOn && parsed.temperature !== undefined && parsed.temperature !== 1) {
+    parsed.temperature = 1;
+  }
+  return supportsThinking;
+}
+
+/**
  * Mutate a parsed /v1/messages body in place to match Claude Code's wire
  * format: adaptive thinking, context management, billing metadata, system
  * prompt shaping, Claude tool schemas, and outbound tool-name/argument
@@ -525,30 +572,7 @@ async function transformClaudeRequestBody(
 ): Promise<{ inboundToolNameMap: Record<string, string> }> {
   let inboundToolNameMap = INBOUND_TOOL_NAME_MAP;
 
-  // Only inject adaptive thinking for models that support it.
-  // Use an explicit allowlist — haiku and older sonnet variants
-  // (e.g. claude-sonnet-4-5) reject the field entirely.
-  // claude-sonnet-4-6 and claude-opus-4-x are confirmed to support
-  // interleaved-thinking-2025-05-14.
-  const THINKING_MODELS = [
-    "claude-opus-4",
-    "claude-sonnet-4-6",
-  ];
-  const supportsThinking = parsed.model &&
-    THINKING_MODELS.some((m: string) => parsed.model.includes(m));
-  if (!parsed.thinking && supportsThinking) {
-    parsed.thinking = { type: "adaptive" };
-  }
-
-  // Anthropic requires temperature=1 when thinking is enabled/adaptive
-  const thinkingType = parsed.thinking?.type;
-  if (
-    (thinkingType === "enabled" || thinkingType === "adaptive") &&
-    parsed.temperature !== undefined &&
-    parsed.temperature !== 1
-  ) {
-    parsed.temperature = 1;
-  }
+  const supportsThinking = applyThinkingConfig(parsed);
 
   if (!parsed.system) parsed.system = [];
   if (Array.isArray(parsed.messages)) {

@@ -21,6 +21,7 @@ import { extractOAuthErrorDetail } from "./oauth.js";
 import { selectClaudeCredentials } from "./keychain.js";
 import {
   default as pluginModule,
+  applyThinkingConfig,
   deriveModelDisplayName,
   getClaudeToolsForActiveOpenCodeTools,
   getInboundToolNameMapForActiveOpenCodeTools,
@@ -33,36 +34,11 @@ import {
 } from "./index.js";
 import { createSseProcessor, parseSseEvent, buildSseEvent } from "./stream.js";
 
-// ── Helpers (extracted / reimplemented from index.ts for unit testing) ────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const THINKING_MODELS = [
-  "claude-opus-4",
-  "claude-sonnet-4-6",
-];
-
-function shouldInjectThinking(model: string | undefined): boolean {
-  if (!model) return false;
-  return THINKING_MODELS.some((m) => model.includes(m));
-}
-
-// Simulate the body-transform logic from the fetch wrapper
 function transformBody(bodyStr: string): Record<string, unknown> {
   const parsed = JSON.parse(bodyStr);
-
-  const supportsThinking = shouldInjectThinking(parsed.model);
-  if (!parsed.thinking && supportsThinking) {
-    parsed.thinking = { type: "adaptive" };
-  }
-
-  const thinkingType = parsed.thinking?.type;
-  if (
-    (thinkingType === "enabled" || thinkingType === "adaptive") &&
-    parsed.temperature !== undefined &&
-    parsed.temperature !== 1
-  ) {
-    parsed.temperature = 1;
-  }
-
+  applyThinkingConfig(parsed);
   return parsed;
 }
 
@@ -84,26 +60,42 @@ describe("thinking injection", () => {
     assert.equal(out.thinking, undefined, "unknown model must not get thinking injected");
   });
 
-  it("injects adaptive thinking for claude-sonnet-4-6", () => {
-    const out = transformBody(JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }));
-    assert.deepEqual(out.thinking, { type: "adaptive" });
-  });
-
-  it("injects adaptive thinking for claude-opus-4-5", () => {
-    const out = transformBody(JSON.stringify({ model: "claude-opus-4-5", messages: [] }));
-    assert.deepEqual(out.thinking, { type: "adaptive" });
-  });
-
-  it("injects adaptive thinking for claude-opus-4-6", () => {
-    const out = transformBody(JSON.stringify({ model: "claude-opus-4-6", messages: [] }));
-    assert.deepEqual(out.thinking, { type: "adaptive" });
-  });
+  for (const model of [
+    "claude-sonnet-4-6",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-20250514",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-haiku-5-5",
+  ]) {
+    it(`injects adaptive thinking with summarized display for ${model}`, () => {
+      const out = transformBody(JSON.stringify({ model, messages: [] }));
+      assert.deepEqual(out.thinking, { type: "adaptive", display: "summarized" });
+    });
+  }
 
   it("does not overwrite an existing thinking block", () => {
     const out = transformBody(
       JSON.stringify({ model: "claude-sonnet-4-6", messages: [], thinking: { type: "disabled" } }),
     );
     assert.deepEqual(out.thinking, { type: "disabled" });
+  });
+
+  it("adds summarized display to incoming thinking without display", () => {
+    const out = transformBody(
+      JSON.stringify({ model: "claude-opus-5-5", messages: [], thinking: { type: "adaptive", block_binding: "x" } }),
+    );
+    assert.deepEqual(out.thinking, { type: "adaptive", block_binding: "x", display: "summarized" });
+  });
+
+  it("keeps an explicit display value", () => {
+    const out = transformBody(
+      JSON.stringify({ model: "claude-opus-5-5", messages: [], thinking: { type: "adaptive", display: "omitted" } }),
+    );
+    assert.deepEqual(out.thinking, { type: "adaptive", display: "omitted" });
   });
 });
 

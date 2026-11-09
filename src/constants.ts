@@ -109,6 +109,12 @@ export const STAINLESS_HEADERS: Record<string, string> = {
 export const DEFAULT_EFFORT =
   process.env.ANTHROPIC_DEFAULT_EFFORT || "medium";
 
+// Newer models (Opus 4.7+, all 5.x) default thinking.display to "omitted",
+// which returns thinking blocks with empty text, so OpenCode has nothing to
+// show. "summarized" restores readable reasoning.
+export const THINKING_DISPLAY =
+  process.env.ANTHROPIC_THINKING_DISPLAY || "summarized";
+
 export const CLEAR_THINKING_TYPE =
   process.env.ANTHROPIC_CLEAR_THINKING_TYPE || "clear_thinking_20251015";
 

@@ -17,6 +17,12 @@
   (`grep -a -o` for e.g. `oldString:` / `path:t.annotate` in `opencode.exe`)
   — schema drift makes tool calls fail with "Missing key" errors.
 
+- Opus 4.7+ and all 5.x models default `thinking.display` to `"omitted"`
+  (empty thinking text), so `applyThinkingConfig` sets `display: "summarized"`
+  whenever thinking is on and no display was sent. Model support for injected
+  thinking is version-based (`supportsAdaptiveThinking`), not a name list:
+  all 5.x families including Haiku get it; Haiku 4.x and Sonnet < 4.6 don't.
+
 ## Testing
 
 - `npm test` builds with `tsc` and runs only `dist/index.test.js`.
