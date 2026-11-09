@@ -81,16 +81,16 @@ export function extractFirstUserMessageText(
  */
 export const PARAM_SNAKE_TO_CAMEL: Record<string, Record<string, string>> = {
   Edit: {
-    file_path: "filePath",
+    file_path: "path",
     old_string: "oldString",
     new_string: "newString",
     replace_all: "replaceAll",
   },
   Read: {
-    file_path: "filePath",
+    file_path: "path",
   },
   Write: {
-    file_path: "filePath",
+    file_path: "path",
     content: "content", // same name, but include for completeness
   },
   // Grep: Claude has many more params but OpenCode only understands pattern/path/include
@@ -114,31 +114,31 @@ export const PARAM_SNAKE_TO_CAMEL: Record<string, Record<string, string>> = {
     // Handled specially in translateToolArgsJsonString / translateArgsOpencodeToClaude
   },
   TodoWrite: {
-    // Item shape differs — handled specially (activeForm → priority per item)
+    // Item shape differs — handled specially (activeForm dropped per item)
   },
   Skill: {
-    skill: "name", // Claude sends "skill" (the name), OpenCode expects "name"
+    skill: "id", // Claude sends "skill" (the name), OpenCode expects "id"
   },
 };
 
 export const PARAM_CAMEL_TO_SNAKE: Record<string, Record<string, string>> = {
   Edit: {
-    filePath: "file_path",
+    path: "file_path",
     oldString: "old_string",
     newString: "new_string",
     replaceAll: "replace_all",
   },
   Read: {
-    filePath: "file_path",
+    path: "file_path",
   },
   Write: {
-    filePath: "file_path",
+    path: "file_path",
   },
   Grep: {
     include: "glob",
   },
   Skill: {
-    name: "skill",
+    id: "skill",
   },
 };
 
@@ -222,14 +222,14 @@ export function translateToolArgsJsonString(json: string, toolName: string): str
 
   // 3. Tool-specific deeper translations.
   if (toolName === "TodoWrite" && Array.isArray(out.todos)) {
-    // Claude: { content, status, activeForm }. OpenCode: { content, status, priority }.
-    // OpenCode's priority is typed as z.string() so the activeForm text works fine.
+    // Claude: { content, status, activeForm }. OpenCode: { content, status }.
     for (const item of out.todos as Array<Record<string, unknown>>) {
-      if (item && typeof item === "object" && "activeForm" in item) {
-        item.priority = item.activeForm;
-        delete item.activeForm;
-      }
+      if (item && typeof item === "object") delete item.activeForm;
     }
+  }
+  if (toolName === "Read" && out.offset === 0) {
+    // Claude allows offset 0; OpenCode's read offset is 1-based.
+    out.offset = 1;
   }
   if (toolName === "Agent" && typeof out.subagent_type === "string") {
     const mapped = AGENT_TYPE_CLAUDE_TO_OPENCODE[out.subagent_type];
@@ -301,14 +301,11 @@ export function translateArgsOpencodeToClaude(
     delete out.command;
   }
 
-  // 3. TodoWrite: OpenCode { priority, status∈{…,cancelled} } → Claude
-  //    { activeForm, status∈{pending,in_progress,completed} }.
+  // 3. TodoWrite: OpenCode { content, status∈{…,cancelled} } → Claude
+  //    { content, activeForm, status∈{pending,in_progress,completed} }.
   if (toolName === "TodoWrite" && Array.isArray(out.todos)) {
     for (const item of out.todos as Array<Record<string, unknown>>) {
-      if (item.priority && !item.activeForm) {
-        item.activeForm = item.priority;
-        delete item.priority;
-      }
+      if (!item.activeForm) item.activeForm = item.content;
       if (item.status === "cancelled") {
         item.status = "completed";
       }

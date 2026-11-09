@@ -10,6 +10,12 @@
   callback — they are single-use and only that callback's result is persisted.
 - `TOOL_NAME_MAP` (OpenCode → Claude) is the single source of truth for tool
   names; `INBOUND_TOOL_NAME_MAP` is derived from it.
+- Only OpenCode ≥ 2.2 tool schemas are supported: read/write/edit take `path`
+  (not `filePath`), skill takes `id` (not `name`), todowrite items have no
+  `priority`, and read `offset` is 1-based. When OpenCode bumps a minor
+  version, re-check the tool input schemas in the installed binary
+  (`grep -a -o` for e.g. `oldString:` / `path:t.annotate` in `opencode.exe`)
+  — schema drift makes tool calls fail with "Missing key" errors.
 
 ## Testing
 

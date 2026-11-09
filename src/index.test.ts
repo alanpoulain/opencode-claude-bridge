@@ -368,9 +368,9 @@ describe("translateToolArgsJsonString", () => {
     return JSON.parse(translateToolArgsJsonString(JSON.stringify(args), toolName));
   }
 
-  it("renames file_path → filePath for Read", () => {
+  it("renames file_path → path for Read", () => {
     const out = translated("Read", { file_path: "/tmp/x.txt" });
-    assert.deepEqual(out, { filePath: "/tmp/x.txt" });
+    assert.deepEqual(out, { path: "/tmp/x.txt" });
   });
 
   it("renames all Edit params", () => {
@@ -381,7 +381,7 @@ describe("translateToolArgsJsonString", () => {
       replace_all: true,
     });
     assert.deepEqual(out, {
-      filePath: "/f.ts",
+      path: "/f.ts",
       oldString: "foo",
       newString: "bar",
       replaceAll: true,
@@ -393,12 +393,12 @@ describe("translateToolArgsJsonString", () => {
     assert.deepEqual(out, { pattern: "hello", include: "*.ts", path: "/src" });
   });
 
-  it("renames skill → name for Skill and strips args (OpenCode skill has no args param)", () => {
+  it("renames skill → id for Skill and strips args (OpenCode skill has no args param)", () => {
     const out = translated("Skill", { skill: "commit", args: "-m fix" });
-    assert.deepEqual(out, { name: "commit" });
+    assert.deepEqual(out, { id: "commit" });
   });
 
-  it("translates activeForm → priority INSIDE TodoWrite todos[]", () => {
+  it("drops activeForm INSIDE TodoWrite todos[]", () => {
     const out = translated("TodoWrite", {
       todos: [
         { content: "fix bug", status: "pending", activeForm: "Running tests" },
@@ -407,8 +407,8 @@ describe("translateToolArgsJsonString", () => {
     });
     assert.deepEqual(out, {
       todos: [
-        { content: "fix bug", status: "pending", priority: "Running tests" },
-        { content: "ship it", status: "completed", priority: "Shipping" },
+        { content: "fix bug", status: "pending" },
+        { content: "ship it", status: "completed" },
       ],
     });
   });
@@ -422,8 +422,7 @@ describe("translateToolArgsJsonString", () => {
     });
     // content preserved verbatim
     assert.equal(out.todos[0].content, content);
-    // activeForm key renamed to priority
-    assert.equal(out.todos[0].priority, "Editing foo.ts");
+    // activeForm key dropped
     assert.equal(out.todos[0].activeForm, undefined);
   });
 
@@ -504,9 +503,14 @@ describe("translateToolArgsJsonString", () => {
     assert.deepEqual(out, { command: "ls" });
   });
 
+  it("clamps Read offset 0 → 1 (OpenCode offsets are 1-based)", () => {
+    const out = translated("Read", { file_path: "/x.txt", offset: 0, limit: 10 });
+    assert.deepEqual(out, { path: "/x.txt", offset: 1, limit: 10 });
+  });
+
   it("strips Claude-only Read field (pages)", () => {
     const out = translated("Read", { file_path: "/x.pdf", pages: "1-5" });
-    assert.deepEqual(out, { filePath: "/x.pdf" });
+    assert.deepEqual(out, { path: "/x.pdf" });
   });
 
   it("strips Claude-only Grep fields", () => {
@@ -578,7 +582,7 @@ describe("translateToolArgsJsonString", () => {
 describe("translateArgsOpencodeToClaude", () => {
   it("renames camelCase keys to snake_case for Edit", () => {
     const out = translateArgsOpencodeToClaude("Edit", {
-      filePath: "/f.ts",
+      path: "/f.ts",
       oldString: "a",
       newString: "b",
       replaceAll: true,
@@ -588,6 +592,28 @@ describe("translateArgsOpencodeToClaude", () => {
       old_string: "a",
       new_string: "b",
       replace_all: true,
+    });
+  });
+
+  it("renames path → file_path for Read and Write", () => {
+    assert.deepEqual(translateArgsOpencodeToClaude("Read", { path: "/r.ts", offset: 5 }), {
+      file_path: "/r.ts",
+      offset: 5,
+    });
+    assert.deepEqual(translateArgsOpencodeToClaude("Write", { path: "/w.ts", content: "x" }), {
+      file_path: "/w.ts",
+      content: "x",
+    });
+  });
+
+  it("renames id → skill for Skill", () => {
+    assert.deepEqual(translateArgsOpencodeToClaude("Skill", { id: "commit" }), { skill: "commit" });
+  });
+
+  it("keeps path unchanged for Grep", () => {
+    assert.deepEqual(translateArgsOpencodeToClaude("Grep", { pattern: "x", path: "/src" }), {
+      pattern: "x",
+      path: "/src",
     });
   });
 
@@ -664,17 +690,17 @@ describe("translateArgsOpencodeToClaude", () => {
     assert.equal(out.timeout, undefined);
   });
 
-  it("renames priority → activeForm in TodoWrite and collapses cancelled → completed", () => {
+  it("synthesizes activeForm from content in TodoWrite and collapses cancelled → completed", () => {
     const out = translateArgsOpencodeToClaude("TodoWrite", {
       todos: [
-        { content: "a", status: "pending", priority: "Doing a" },
-        { content: "b", status: "cancelled", priority: "Was doing b" },
+        { content: "a", status: "pending" },
+        { content: "b", status: "cancelled" },
       ],
     });
     assert.deepEqual(out, {
       todos: [
-        { content: "a", status: "pending", activeForm: "Doing a" },
-        { content: "b", status: "completed", activeForm: "Was doing b" },
+        { content: "a", status: "pending", activeForm: "a" },
+        { content: "b", status: "completed", activeForm: "b" },
       ],
     });
   });
@@ -839,9 +865,9 @@ describe("SSE processor: tool name mapping", () => {
 });
 
 describe("SSE processor: argument translation", () => {
-  it("translates file_path → filePath for Read", () => {
+  it("translates file_path → path for Read", () => {
     const out = runToolUse("Read", ['{"file_path": "/tmp/test.txt"}']);
-    assert.deepEqual(finalToolArgs(out, 1), { filePath: "/tmp/test.txt" });
+    assert.deepEqual(finalToolArgs(out, 1), { path: "/tmp/test.txt" });
   });
 
   it("translates all Edit params", () => {
@@ -849,7 +875,7 @@ describe("SSE processor: argument translation", () => {
       '{"file_path": "/f.ts", "old_string": "foo", "new_string": "bar", "replace_all": true}',
     ]);
     assert.deepEqual(finalToolArgs(out, 1), {
-      filePath: "/f.ts",
+      path: "/f.ts",
       oldString: "foo",
       newString: "bar",
       replaceAll: true,
@@ -861,12 +887,12 @@ describe("SSE processor: argument translation", () => {
     assert.deepEqual(finalToolArgs(out, 1), { pattern: "hello", include: "*.ts" });
   });
 
-  it("translates activeForm → priority per todo item in TodoWrite", () => {
+  it("drops activeForm per todo item in TodoWrite", () => {
     const out = runToolUse("TodoWrite", [
       '{"todos": [{"content": "fix", "status": "pending", "activeForm": "Fixing"}]}',
     ]);
     assert.deepEqual(finalToolArgs(out, 1), {
-      todos: [{ content: "fix", status: "pending", priority: "Fixing" }],
+      todos: [{ content: "fix", status: "pending" }],
     });
   });
 
@@ -893,7 +919,7 @@ describe("SSE processor: argument translation", () => {
 
   it("translates skill → name and strips args for Skill", () => {
     const out = runToolUse("Skill", ['{"skill": "commit", "args": "-m fix"}']);
-    assert.deepEqual(finalToolArgs(out, 1), { name: "commit" });
+    assert.deepEqual(finalToolArgs(out, 1), { id: "commit" });
   });
 
   it("leaves Bash args untouched", () => {
@@ -921,7 +947,7 @@ describe("SSE processor: argument translation", () => {
 describe("SSE processor: chunk boundary handling", () => {
   it("handles args split across many small fragments", () => {
     const out = runToolUse("Read", ['{"fi', 'le_', 'pa', 'th":', ' "/', 'tmp/', 'x.t', 'xt"}']);
-    assert.deepEqual(finalToolArgs(out, 1), { filePath: "/tmp/x.txt" });
+    assert.deepEqual(finalToolArgs(out, 1), { path: "/tmp/x.txt" });
   });
 
   it("handles multiple SSE events concatenated into one chunk", () => {
@@ -942,7 +968,7 @@ describe("SSE processor: chunk boundary handling", () => {
         index: 1,
       });
     const out = proc.feedChunk(combined);
-    assert.deepEqual(finalToolArgs(out, 1), { filePath: "/a.txt" });
+    assert.deepEqual(finalToolArgs(out, 1), { path: "/a.txt" });
     assert.ok(parseAllEvents(out).some((e) => e.data.type === "content_block_stop"));
   });
 
@@ -1020,8 +1046,8 @@ describe("SSE processor: interleaved and concurrent tool_use blocks", () => {
     out += proc.feedChunk(sseEvent("content_block_stop", { type: "content_block_stop", index: 1 }));
     out += proc.feedChunk(sseEvent("content_block_stop", { type: "content_block_stop", index: 2 }));
 
-    assert.deepEqual(finalToolArgs(out, 1), { filePath: "/read.txt" });
-    assert.deepEqual(finalToolArgs(out, 2), { filePath: "/write.txt", content: "hi" });
+    assert.deepEqual(finalToolArgs(out, 1), { path: "/read.txt" });
+    assert.deepEqual(finalToolArgs(out, 2), { path: "/write.txt", content: "hi" });
   });
 });
 
