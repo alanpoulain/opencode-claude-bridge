@@ -19,6 +19,12 @@
 - Prompt-cache markers are capped at 4 by `applyCacheBreakpoints` (last
   system block always marked, earliest markers dropped first) — never strip
   them wholesale, which silently disables caching.
+- The outbound system prompt mirrors Claude Code's layout (`tys` in the
+  2.1.319 binary): billing header (no cache), identity line as its own block
+  (cached), then everything else joined with `"\n"` in one block (cached).
+  `collapseSystemBlocks` builds it; `applyCacheBreakpoints` pins markers on
+  the identity and final blocks. To re-check against a new binary, run
+  `strings -n 8` on it and search for `__SYSTEM_PROMPT_STATIC_BREAKPOINT__`.
 - System-prompt hooks must be registered on every kind in
   `SYSTEM_PROMPT_HOOKS` (`context`, `compaction`, `generate`, `title`) —
   OpenCode dispatches each request kind to its own hook.

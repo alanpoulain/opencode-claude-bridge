@@ -38,6 +38,7 @@ import {
   getInboundToolNameMapForActiveOpenCodeTools,
   mapOutboundToolName,
   applyCacheBreakpoints,
+  collapseSystemBlocks,
   injectClaudePrefix,
   mergeSystemBlocks,
   refreshCredentialLayered,
@@ -1321,6 +1322,43 @@ describe("mergeSystemBlocks", () => {
   });
 });
 
+describe("collapseSystemBlocks", () => {
+  const billing = "x-anthropic-billing-header: cc_version=2.1.0; cc_entrypoint=sdk-cli; cch=00000;";
+
+  it("lays out billing, identity line, then the rest joined with a newline", () => {
+    const out = collapseSystemBlocks([
+      { type: "text", text: billing, cache_control: { type: "ephemeral" } },
+      { type: "text", text: `${CLAUDE_PREFIX}\n\nYou are an AI agent.` },
+      { type: "text", text: "Instructions from: AGENTS.md", cache_control: { type: "ephemeral" } },
+    ]);
+    assert.deepEqual(out, [
+      { type: "text", text: billing },
+      { type: "text", text: CLAUDE_PREFIX },
+      { type: "text", text: "You are an AI agent.\nInstructions from: AGENTS.md" },
+    ]);
+  });
+
+  it("keeps a captured identity block and folds OpenCode's blocks into the rest", () => {
+    const identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+    const out = collapseSystemBlocks([
+      { type: "text", text: billing },
+      { type: "text", text: identity },
+      { type: "text", text: "Claude Code instructions." },
+      { type: "text", text: "AGENTS.md" },
+    ]);
+    assert.deepEqual(out.map((b) => b.text), [billing, identity, "Claude Code instructions.\nAGENTS.md"]);
+  });
+
+  it("drops empty blocks and works without an identity line", () => {
+    const out = collapseSystemBlocks([
+      { type: "text", text: billing },
+      { type: "text", text: "" },
+      { type: "text", text: "prompt" },
+    ]);
+    assert.deepEqual(out.map((b) => b.text), [billing, "prompt"]);
+  });
+});
+
 describe("plugin module shape", () => {
   it("default-exports { id, setup } so opencode's loader recognises it", () => {
     // A bare function default export sends opencode down its legacy path, where
@@ -1981,6 +2019,27 @@ describe("applyCacheBreakpoints", () => {
     assert.deepEqual(body.messages[2].content[0].cache_control, eph);
     // Earliest markers are the ones dropped.
     assert.equal(body.system[1].cache_control, undefined);
+  });
+
+  it("marks the identity block and the system end, like Claude Code", () => {
+    const body: any = {
+      system: [
+        { type: "text", text: "x-anthropic-billing-header: cc_version=1;" },
+        { type: "text", text: CLAUDE_PREFIX },
+        { type: "text", text: "rest" },
+      ],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "a", cache_control: { ...eph } }] },
+        { role: "user", content: [{ type: "text", text: "b", cache_control: { ...eph } }] },
+        { role: "user", content: [{ type: "text", text: "c", cache_control: { ...eph } }] },
+      ],
+    };
+    applyCacheBreakpoints(body);
+    assert.equal(countMarkers(body), 4);
+    assert.equal(body.system[0].cache_control, undefined);
+    assert.deepEqual(body.system[1].cache_control, eph);
+    assert.deepEqual(body.system[2].cache_control, eph);
+    assert.equal(body.messages[0].content[0].cache_control, undefined);
   });
 
   it("keeps a text-block marker in the last message", () => {

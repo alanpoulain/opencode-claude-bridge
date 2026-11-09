@@ -85,6 +85,13 @@ const INBOUND_TOOL_NAME_MAP: Record<string, string> = Object.fromEntries(
 const CLAUDE_PREFIX =
   "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
+/** Every identity line Claude Code may send as its own system block. */
+const CLAUDE_IDENTITY_LINES = [
+  "You are Claude Code, Anthropic's official CLI for Claude.",
+  "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+  CLAUDE_PREFIX,
+];
+
 /**
  * Derive a human-readable display name from a Claude model ID.
  *
@@ -167,6 +174,43 @@ export function mergeSystemBlocks(
 }
 
 /**
+ * Lay the system prompt out the way Claude Code 2.x does: the billing header,
+ * then the identity line as its own block, then everything else joined with
+ * "\n" into one block. An identity line leading a larger block is split off.
+ * Existing cache markers are dropped; applyCacheBreakpoints sets them on the
+ * identity and final blocks, as Claude Code does.
+ */
+export function collapseSystemBlocks(
+  system: Array<{ type?: string; text?: string; cache_control?: unknown }>,
+): Array<{ type: string; text: string }> {
+  let billing: string | undefined;
+  let identity: string | undefined;
+  const rest: string[] = [];
+  for (const block of system) {
+    let text = block?.text;
+    if (typeof text !== "string" || text === "") continue;
+    if (billing === undefined && text.startsWith("x-anthropic-billing-header:")) {
+      billing = text;
+      continue;
+    }
+    if (identity === undefined) {
+      const line = CLAUDE_IDENTITY_LINES.find((l) => text === l || text!.startsWith(`${l}\n`));
+      if (line) {
+        identity = line;
+        text = text.slice(line.length).replace(/^\n+/, "");
+        if (text === "") continue;
+      }
+    }
+    rest.push(text);
+  }
+  const out: Array<{ type: string; text: string }> = [];
+  if (billing !== undefined) out.push({ type: "text", text: billing });
+  if (identity !== undefined) out.push({ type: "text", text: identity });
+  if (rest.length > 0) out.push({ type: "text", text: rest.join("\n") });
+  return out;
+}
+
+/**
  * Session request kinds that reach the model. OpenCode dispatches a separate
  * hook per kind, so a prefix registered only on `context` would leave
  * compaction, generate and title requests without it.
@@ -202,11 +246,13 @@ export const MAX_CACHE_BREAKPOINTS = 4;
  *
  * - The last non-empty system block always gets a breakpoint: it caches tools
  *   + the whole (stable) system prompt, the biggest invariant prefix.
- * - Over the limit, the earliest markers are dropped first. The system-end
- *   breakpoint and the latest message markers (which carry the cache from one
- *   turn to the next) survive. A top-level `cache_control` uses one slot.
- * - The added breakpoint uses ttl "1h" when any other marker does, since a
- *   1h marker may not follow a 5m one.
+ * - A Claude Code identity-line block gets one too, as Claude Code marks it.
+ * - Over the limit, the earliest markers are dropped first. The system
+ *   breakpoints above and the latest message markers (which carry the cache
+ *   from one turn to the next) survive. A top-level `cache_control` uses one
+ *   slot.
+ * - Added breakpoints use ttl "1h" when any other marker does, since a 1h
+ *   marker may not follow a 5m one.
  */
 export function applyCacheBreakpoints(parsed: any): void {
   type Holder = Record<string, unknown>;
@@ -226,11 +272,16 @@ export function applyCacheBreakpoints(parsed: any): void {
   const systemEnd = [...system]
     .reverse()
     .find((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 0);
-  if (systemEnd && systemEnd.cache_control == null) {
-    const usesHourTtl = marked().some(
-      (b) => isObject(b.cache_control) && b.cache_control.ttl === "1h",
-    ) || (isObject(parsed.cache_control) && parsed.cache_control.ttl === "1h");
-    systemEnd.cache_control = usesHourTtl ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+  const identity = system.find(
+    (b) => b.type === "text" && CLAUDE_IDENTITY_LINES.includes(b.text as string),
+  );
+  const pinned = [identity, systemEnd].filter((b): b is Holder => !!b);
+  const usesHourTtl = marked().some(
+    (b) => isObject(b.cache_control) && b.cache_control.ttl === "1h",
+  ) || (isObject(parsed.cache_control) && parsed.cache_control.ttl === "1h");
+  for (const block of pinned) {
+    if (block.cache_control != null) continue;
+    block.cache_control = usesHourTtl ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
   }
 
   const budget = MAX_CACHE_BREAKPOINTS - (parsed.cache_control != null ? 1 : 0);
@@ -238,7 +289,7 @@ export function applyCacheBreakpoints(parsed: any): void {
   let excess = current.length - budget;
   for (const block of current) {
     if (excess <= 0) break;
-    if (block === systemEnd) continue;
+    if (pinned.includes(block)) continue;
     delete block.cache_control;
     excess--;
   }
@@ -474,7 +525,7 @@ export function stripAssistantPrefillForClaude(
 function normalizeSystemBlocks(
   system: Array<{ type?: string; text?: string }>,
 ): Array<{ type?: string; text?: string }> {
-  const normalized = system.map((item) => {
+  return system.map((item) => {
     if (item.type === "text" && item.text) {
       return {
         ...item,
@@ -487,25 +538,6 @@ function normalizeSystemBlocks(
     }
     return item;
   });
-
-  const billing = normalized[0];
-  const prompt = normalized[1];
-  if (
-    billing?.type === "text"
-    && billing.text?.startsWith("x-anthropic-billing-header:")
-    && prompt?.type === "text"
-    && prompt.text?.startsWith(`${CLAUDE_PREFIX}\n\n`)
-  ) {
-    const rest = prompt.text.slice(`${CLAUDE_PREFIX}\n\n`.length);
-    return [
-      billing,
-      { ...prompt, text: CLAUDE_PREFIX },
-      { ...prompt, text: rest },
-      ...normalized.slice(2),
-    ];
-  }
-
-  return normalized;
 }
 
 function readCachedClaudePromptCache(): ClaudeSystemPromptCache | null {
@@ -842,6 +874,7 @@ async function transformClaudeRequestBody(
     // Otherwise keep the existing prompt but shape it closer to Claude Code.
     parsed.system = normalizeSystemBlocks(parsed.system);
   }
+  parsed.system = collapseSystemBlocks(parsed.system);
   // Keep OpenCode's default tool schemas for non-Claude targets.
   // Claude wire schemas are only useful for Anthropic-native
   // requests or Claude-family models on Anthropic-compatible
