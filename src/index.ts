@@ -159,6 +159,23 @@ export function mergeSystemBlocks(
   ];
 }
 
+/**
+ * Session request kinds that reach the model. OpenCode dispatches a separate
+ * hook per kind, so a prefix registered only on `context` would leave
+ * compaction, generate and title requests without it.
+ */
+export const SYSTEM_PROMPT_HOOKS = ["context", "compaction", "generate", "title"] as const;
+
+/** Prepend CLAUDE_PREFIX to the first system block, once. */
+export function injectClaudePrefix(system: Array<{ type?: string; text?: string }>): void {
+  if (system.some((s) => typeof s?.text === "string" && s.text.includes(CLAUDE_PREFIX))) return;
+  if (system.length > 0) {
+    system[0] = { ...system[0], text: `${CLAUDE_PREFIX}\n\n${system[0].text ?? ""}` };
+  } else {
+    system.push({ type: "text", text: CLAUDE_PREFIX });
+  }
+}
+
 export function stripSystemCacheControl(
   system: Array<{ type?: string; text?: string; cache_control?: unknown }>,
 ): Array<{ type?: string; text?: string }> {
@@ -1034,22 +1051,20 @@ const OpenCodeClaudeBridge = {
       });
     });
 
-    // ── System prompt prefix ──
-    await ctx.session.hook(
-      "context",
-      (event: { system: Array<{ type?: string; text?: string }> }) => {
-        if (event.system.some((s) => typeof s?.text === "string" && s.text.includes(CLAUDE_PREFIX))) return;
-        if (event.system.length > 0) {
-          event.system[0] = {
-            ...event.system[0],
-            text: `${CLAUDE_PREFIX}\n\n${event.system[0].text ?? ""}`,
-          };
-        } else {
-          event.system.push({ type: "text", text: CLAUDE_PREFIX });
-        }
-      },
-      { providerID: "anthropic" },
-    );
+    // ── System prompt prefix (every request kind that reaches the model) ──
+    for (const kind of SYSTEM_PROMPT_HOOKS) {
+      await ctx.session.hook(
+        kind,
+        (event: {
+          model?: { providerID?: string };
+          system: Array<{ type?: string; text?: string }>;
+        }) => {
+          if (event.model?.providerID && event.model.providerID !== "anthropic") return;
+          injectClaudePrefix(event.system);
+        },
+        { providerID: "anthropic" },
+      );
+    }
 
     // ── Wire rewrite (request phase) ──
     await ctx.session.hook(

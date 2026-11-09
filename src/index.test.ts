@@ -26,6 +26,7 @@ import {
   getClaudeToolsForActiveOpenCodeTools,
   getInboundToolNameMapForActiveOpenCodeTools,
   mapOutboundToolName,
+  injectClaudePrefix,
   mergeSystemBlocks,
   resolveOAuthAccessToken,
   rewriteSystemBlocksForModel,
@@ -38,6 +39,8 @@ import { fetchCliVersion, parseDistTagsVersion } from "./cli-version.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const CLAUDE_PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1375,9 +1378,86 @@ describe("plugin module shape", () => {
 
     assert.deepEqual(
       hooks.map((h) => `${h.name}:${h.options?.providerID ?? ""}`).sort(),
-      ["context:anthropic", "http.request:anthropic", "http.response:anthropic"],
+      [
+        "compaction:anthropic",
+        "context:anthropic",
+        "generate:anthropic",
+        "http.request:anthropic",
+        "http.response:anthropic",
+        "title:anthropic",
+      ],
     );
     assert.equal(typeof cleanup, "function");
+  });
+
+  it("v2 setup prefixes the system prompt of title and compaction requests", async () => {
+    const callbacks = new Map<string, (event: any) => unknown>();
+    const ctx = {
+      integration: {
+        transform: async (editor: (editor: { method: { update(r: unknown): void } }) => void) => {
+          editor({ method: { update() {} } });
+        },
+        connection: { active: async () => undefined, resolve: async () => undefined },
+      },
+      session: {
+        hook: async (name: string, cb: (event: any) => unknown) => {
+          callbacks.set(name, cb);
+        },
+      },
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as typeof globalThis.fetch;
+    try {
+      await (pluginModule.setup as (c: unknown) => Promise<unknown>)(ctx);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    for (const kind of ["title", "compaction"]) {
+      const event = {
+        model: { providerID: "anthropic" },
+        system: [{ type: "text", text: "Generate a title." }],
+      };
+      callbacks.get(kind)!(event);
+      assert.ok(event.system[0].text.startsWith(CLAUDE_PREFIX), `${kind} must be prefixed`);
+
+      const other = {
+        model: { providerID: "openai" },
+        system: [{ type: "text", text: "Generate a title." }],
+      };
+      callbacks.get(kind)!(other);
+      assert.equal(other.system[0].text, "Generate a title.", `${kind} must skip other providers`);
+    }
+  });
+});
+
+describe("injectClaudePrefix", () => {
+  it("prepends the prefix to the first block", () => {
+    const system = [{ type: "text", text: "Body" }, { type: "text", text: "Env" }];
+    injectClaudePrefix(system);
+    assert.equal(system[0].text, `${CLAUDE_PREFIX}\n\nBody`);
+    assert.equal(system[1].text, "Env");
+  });
+
+  it("adds a block when the system prompt is empty", () => {
+    const system: Array<{ type?: string; text?: string }> = [];
+    injectClaudePrefix(system);
+    assert.deepEqual(system, [{ type: "text", text: CLAUDE_PREFIX }]);
+  });
+
+  it("leaves the prompt alone when a later block already carries the prefix", () => {
+    const system = [{ type: "text", text: "Body" }, { type: "text", text: CLAUDE_PREFIX }];
+    injectClaudePrefix(system);
+    assert.equal(system[0].text, "Body");
+  });
+
+  it("is idempotent", () => {
+    const system = [{ type: "text", text: "Body" }];
+    injectClaudePrefix(system);
+    injectClaudePrefix(system);
+    assert.equal(system[0].text, `${CLAUDE_PREFIX}\n\nBody`);
   });
 });
 
