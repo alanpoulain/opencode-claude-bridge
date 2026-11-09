@@ -616,6 +616,72 @@ export async function resolveOAuthAccessToken(
   return null;
 }
 
+function bearerOf(request: Request): string | undefined {
+  const auth = request.headers.get("authorization");
+  return auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
+}
+
+/**
+ * Swap an access token Anthropic already rejected for the Claude CLI's
+ * current one. Read-only: nothing is refreshed here.
+ */
+export function replaceRevokedToken(
+  token: string,
+  revoked: ReadonlySet<string>,
+  getCliTokens: () => { access: string } | null,
+): string {
+  if (!revoked.has(token)) return token;
+  try {
+    const cli = getCliTokens();
+    if (cli?.access && !revoked.has(cli.access)) return cli.access;
+  } catch {}
+  return token;
+}
+
+/**
+ * On a 401, re-send the request once with the Claude CLI's current access
+ * token when it differs from the one rejected — the CLI may have rotated the
+ * shared credential mid-session. Read-only on credentials: nothing is
+ * refreshed here (refresh tokens are single-use; only the integration
+ * `refresh` callback rotates them). Returns the original response when no
+ * retry applies.
+ */
+export async function retryUnauthorizedWithCliToken(
+  request: Request,
+  response: Response,
+  deps: {
+    getCliTokens: () => { access: string } | null;
+    fetch: (request: Request) => Promise<Response>;
+  },
+): Promise<Response> {
+  if (response.status !== 401) return response;
+  let cli: { access: string } | null = null;
+  try {
+    cli = deps.getCliTokens();
+  } catch {}
+  if (!cli?.access || cli.access === bearerOf(request)) return response;
+
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${cli.access}`);
+  const body = request.method === "GET" || request.method === "HEAD"
+    ? null
+    : await request.clone().text();
+  const retried = await deps.fetch(
+    new Request(request.url, { method: request.method, headers, body, signal: request.signal }),
+  );
+  await response.body?.cancel().catch(() => {});
+
+  // fetch already decoded the body; drop headers describing the wire encoding.
+  const outHeaders = new Headers(retried.headers);
+  outHeaders.delete("content-encoding");
+  outHeaders.delete("content-length");
+  return new Response(retried.body, {
+    status: retried.status,
+    statusText: retried.statusText,
+    headers: outHeaders,
+  });
+}
+
 // ── Request/response phases (used by the http.request / http.response
 // hooks) ───────────────────────────────────────────────────────────
 
@@ -966,6 +1032,11 @@ const OpenCodeClaudeBridge = {
     // Presence in this map is also what marks a request as OAuth-rewritten,
     // so concurrent API-key traffic can't flip a shared flag.
     const inboundMaps = new WeakMap<Request, Record<string, string>>();
+    // Access tokens Anthropic answered 401 for while the CLI held a working
+    // one. OpenCode keeps sending its stored token until its expiry triggers a
+    // refresh, so later requests swap it up front instead of paying a 401 +
+    // retry each time.
+    const revokedTokens = new Set<string>();
 
     const toOAuthCredential = (
       tokens: { access: string; refresh: string; expires: number },
@@ -1145,8 +1216,9 @@ const OpenCodeClaudeBridge = {
       async (event: { request: Request }) => {
         const request = event.request;
         if (!isAnthropicApiUrl(request.url)) return;
-        const accessToken = await resolveAccessToken(request);
+        let accessToken = await resolveAccessToken(request);
         if (!accessToken) return; // API-key or unauthenticated — passthrough
+        accessToken = replaceRevokedToken(accessToken, revokedTokens, getClaudeTokens);
         try {
           // ── Headers ──
           const headers = new Headers(request.headers);
@@ -1205,7 +1277,7 @@ const OpenCodeClaudeBridge = {
     // ── SSE tool-name/argument translation (response phase) ──
     await ctx.session.hook(
       "http.response",
-      (event: { request: Request; response: Response }) => {
+      async (event: { request: Request; response: Response }) => {
         // Fallback to our session header covers another plugin replacing the
         // rewritten Request object after us.
         const inboundToolNameMap =
@@ -1214,6 +1286,21 @@ const OpenCodeClaudeBridge = {
             ? INBOUND_TOOL_NAME_MAP
             : undefined);
         if (!inboundToolNameMap) return;
+        if (event.response.status === 401) {
+          try {
+            const retried = await retryUnauthorizedWithCliToken(event.request, event.response, {
+              getCliTokens: getClaudeTokens,
+              fetch: (request) => globalThis.fetch(request),
+            });
+            if (retried !== event.response) {
+              const rejected = bearerOf(event.request);
+              if (rejected && retried.status !== 401) revokedTokens.add(rejected);
+              event.response = retried;
+            }
+          } catch (err) {
+            console.error(`[opencode-claude-bridge] 401 retry failed: ${err}`);
+          }
+        }
         try {
           event.response = wrapAnthropicResponseWithSse(event.response, inboundToolNameMap);
         } catch (err) {

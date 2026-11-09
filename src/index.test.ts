@@ -36,6 +36,8 @@ import {
   injectClaudePrefix,
   mergeSystemBlocks,
   refreshCredentialLayered,
+  replaceRevokedToken,
+  retryUnauthorizedWithCliToken,
   resolveOAuthAccessToken,
   rewriteSystemBlocksForModel,
   shouldInjectClaudeTools,
@@ -1768,6 +1770,96 @@ describe("parseTokenResponse", () => {
     assert.throws(
       () => parseTokenResponse(200, ok({ access_token: "a", expires_in: 3600 }), "Token exchange"),
       /no refresh_token/,
+    );
+  });
+});
+
+describe("401 recovery with the Claude CLI token", () => {
+  const url = "https://api.anthropic.com/v1/messages?beta=true";
+  const sent = () =>
+    new Request(url, {
+      method: "POST",
+      headers: { authorization: "Bearer old", "content-type": "application/json", "x-app": "cli" },
+      body: '{"model":"claude-opus-4-7"}',
+    });
+  const unauthorized = () => new Response('{"type":"error"}', { status: 401 });
+  const recorder = (reply: () => Response) => {
+    const calls: Request[] = [];
+    return {
+      calls,
+      fetch: async (request: Request) => {
+        calls.push(request);
+        return reply();
+      },
+    };
+  };
+
+  it("leaves non-401 responses alone", async () => {
+    const f = recorder(() => new Response("ok"));
+    const original = new Response("fine", { status: 200 });
+    const out = await retryUnauthorizedWithCliToken(sent(), original, {
+      getCliTokens: () => ({ access: "new" }),
+      fetch: f.fetch,
+    });
+    assert.equal(out, original);
+    assert.equal(f.calls.length, 0);
+  });
+
+  it("does not retry without a CLI token or with the same token", async () => {
+    for (const cli of [null, { access: "old" }]) {
+      const f = recorder(() => new Response("ok"));
+      const original = unauthorized();
+      const out = await retryUnauthorizedWithCliToken(sent(), original, {
+        getCliTokens: () => cli,
+        fetch: f.fetch,
+      });
+      assert.equal(out, original);
+      assert.equal(f.calls.length, 0);
+    }
+  });
+
+  it("re-sends once with the CLI token, same URL, headers and body", async () => {
+    const f = recorder(
+      () => new Response("data: {}\n\n", { status: 200, headers: { "content-encoding": "gzip", "x-id": "1" } }),
+    );
+    const out = await retryUnauthorizedWithCliToken(sent(), unauthorized(), {
+      getCliTokens: () => ({ access: "new" }),
+      fetch: f.fetch,
+    });
+    assert.equal(f.calls.length, 1);
+    const retry = f.calls[0];
+    assert.equal(retry.url, url);
+    assert.equal(retry.method, "POST");
+    assert.equal(retry.headers.get("authorization"), "Bearer new");
+    assert.equal(retry.headers.get("x-app"), "cli");
+    assert.equal(await retry.text(), '{"model":"claude-opus-4-7"}');
+    assert.equal(out.status, 200);
+    assert.equal(out.headers.get("content-encoding"), null);
+    assert.equal(out.headers.get("x-id"), "1");
+    assert.equal(await out.text(), "data: {}\n\n");
+  });
+
+  it("returns the retry's 401 when the CLI token is rejected too", async () => {
+    const f = recorder(() => new Response("nope", { status: 401 }));
+    const out = await retryUnauthorizedWithCliToken(sent(), unauthorized(), {
+      getCliTokens: () => ({ access: "new" }),
+      fetch: f.fetch,
+    });
+    assert.equal(out.status, 401);
+    assert.equal(f.calls.length, 1);
+  });
+
+  it("replaceRevokedToken swaps only rejected tokens", () => {
+    const revoked = new Set(["old"]);
+    assert.equal(replaceRevokedToken("good", revoked, () => ({ access: "cli" })), "good");
+    assert.equal(replaceRevokedToken("old", revoked, () => ({ access: "cli" })), "cli");
+    assert.equal(replaceRevokedToken("old", revoked, () => null), "old");
+    assert.equal(replaceRevokedToken("old", new Set(["old", "cli"]), () => ({ access: "cli" })), "old");
+    assert.equal(
+      replaceRevokedToken("old", revoked, () => {
+        throw new Error("keychain locked");
+      }),
+      "old",
     );
   });
 });
