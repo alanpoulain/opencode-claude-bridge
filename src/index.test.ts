@@ -1433,6 +1433,113 @@ describe("plugin module shape", () => {
   });
 });
 
+describe("http hooks: per-request OAuth tracking", () => {
+  const url = "https://api.anthropic.com/v1/messages";
+  const body = JSON.stringify({
+    model: "claude-opus-4-7",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "read", description: "Read a file", input_schema: { type: "object", properties: {} } }],
+  });
+  const sse = () =>
+    new Response(
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"Read","input":{}}}\n\n' +
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    );
+
+  async function setupHooks() {
+    const callbacks = new Map<string, (event: any) => unknown>();
+    const ctx = {
+      integration: {
+        transform: async (editor: (editor: { method: { update(r: unknown): void } }) => void) => {
+          editor({ method: { update() {} } });
+        },
+        connection: { active: async () => undefined, resolve: async () => undefined },
+      },
+      session: {
+        hook: async (name: string, cb: (event: any) => unknown) => {
+          callbacks.set(name, cb);
+        },
+      },
+    };
+    await (pluginModule.setup as (c: unknown) => Promise<unknown>)(ctx);
+    return {
+      request: async (request: Request) => {
+        const event = { request };
+        await callbacks.get("http.request")!(event);
+        return event.request;
+      },
+      response: async (request: Request, response: Response) => {
+        const event = { request, response };
+        await callbacks.get("http.response")!(event);
+        return event.response;
+      },
+    };
+  }
+
+  async function withNetworkDisabled(run: () => Promise<void>) {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as typeof globalThis.fetch;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it("translates an OAuth response even after an API-key request passed through", async () => {
+    await withNetworkDisabled(async () => {
+      const hooks = await setupHooks();
+      const oauth = await hooks.request(
+        new Request(url, { method: "POST", headers: { authorization: "Bearer tok" }, body }),
+      );
+      const apiKeyOriginal = new Request(url, { method: "POST", headers: { "x-api-key": "sk" }, body });
+      const apiKey = await hooks.request(apiKeyOriginal);
+      assert.equal(apiKey, apiKeyOriginal, "API-key request must pass through");
+
+      const text = await (await hooks.response(oauth, sse())).text();
+      assert.match(text, /"name":"read"/);
+    });
+  });
+
+  it("leaves the response of a passthrough request untouched", async () => {
+    await withNetworkDisabled(async () => {
+      const hooks = await setupHooks();
+      await hooks.request(new Request(url, { method: "POST", headers: { authorization: "Bearer tok" }, body }));
+      const apiKey = await hooks.request(
+        new Request(url, { method: "POST", headers: { "x-api-key": "sk" }, body }),
+      );
+      const original = sse();
+      assert.equal(await hooks.response(apiKey, original), original);
+    });
+  });
+
+  it("falls back to the session header when the rewritten request was replaced", async () => {
+    await withNetworkDisabled(async () => {
+      const hooks = await setupHooks();
+      const oauth = await hooks.request(
+        new Request(url, { method: "POST", headers: { authorization: "Bearer tok" }, body }),
+      );
+      const replaced = new Request(oauth.url, {
+        method: "POST",
+        headers: { "x-claude-code-session-id": oauth.headers.get("x-claude-code-session-id")! },
+      });
+      const text = await (await hooks.response(replaced, sse())).text();
+      assert.match(text, /"name":"read"/);
+    });
+  });
+
+  it("ignores a request it never rewrote", async () => {
+    await withNetworkDisabled(async () => {
+      const hooks = await setupHooks();
+      const original = sse();
+      assert.equal(await hooks.response(new Request(url, { method: "POST" }), original), original);
+    });
+  });
+});
+
 describe("injectClaudePrefix", () => {
   it("prepends the prefix to the first block", () => {
     const system = [{ type: "text", text: "Body" }, { type: "text", text: "Env" }];

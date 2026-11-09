@@ -891,12 +891,11 @@ const OpenCodeClaudeBridge = {
       cachedClaudePromptCache,
       cachedClaudeSystem: cachedClaudePromptCache?.system || null,
     };
-    // True while the last outbound request was OAuth-rewritten; gates the
-    // response hook so API-key traffic passes through untouched.
-    let oauthMode = false;
     // Per-request inbound tool-name map, computed during the request rewrite
     // (differs from the static map when Claude schemas were injected). Keyed
     // weakly on the rewritten Request, which the response event carries.
+    // Presence in this map is also what marks a request as OAuth-rewritten,
+    // so concurrent API-key traffic can't flip a shared flag.
     const inboundMaps = new WeakMap<Request, Record<string, string>>();
 
     const toOAuthCredential = (
@@ -1073,11 +1072,7 @@ const OpenCodeClaudeBridge = {
         const request = event.request;
         if (!isAnthropicApiUrl(request.url)) return;
         const accessToken = await resolveAccessToken(request);
-        if (!accessToken) {
-          oauthMode = false;
-          return; // API-key or unauthenticated — passthrough
-        }
-        oauthMode = true;
+        if (!accessToken) return; // API-key or unauthenticated — passthrough
         try {
           // ── Headers ──
           const headers = new Headers(request.headers);
@@ -1137,8 +1132,14 @@ const OpenCodeClaudeBridge = {
     await ctx.session.hook(
       "http.response",
       (event: { request: Request; response: Response }) => {
-        if (!oauthMode) return;
-        const inboundToolNameMap = inboundMaps.get(event.request) ?? INBOUND_TOOL_NAME_MAP;
+        // Fallback to our session header covers another plugin replacing the
+        // rewritten Request object after us.
+        const inboundToolNameMap =
+          inboundMaps.get(event.request) ??
+          (event.request.headers.get("x-claude-code-session-id") === requestState.sessionId
+            ? INBOUND_TOOL_NAME_MAP
+            : undefined);
+        if (!inboundToolNameMap) return;
         try {
           event.response = wrapAnthropicResponseWithSse(event.response, inboundToolNameMap);
         } catch (err) {
