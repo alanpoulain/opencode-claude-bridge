@@ -32,6 +32,7 @@ import {
   getClaudeToolsForActiveOpenCodeTools,
   getInboundToolNameMapForActiveOpenCodeTools,
   mapOutboundToolName,
+  applyCacheBreakpoints,
   injectClaudePrefix,
   mergeSystemBlocks,
   refreshCredentialLayered,
@@ -1768,6 +1769,122 @@ describe("parseTokenResponse", () => {
       () => parseTokenResponse(200, ok({ access_token: "a", expires_in: 3600 }), "Token exchange"),
       /no refresh_token/,
     );
+  });
+});
+
+describe("applyCacheBreakpoints", () => {
+  const eph = { type: "ephemeral" };
+  const countMarkers = (body: any): number =>
+    [
+      ...(body.tools ?? []),
+      ...(body.system ?? []),
+      ...(body.messages ?? []).flatMap((m: any) => (Array.isArray(m.content) ? m.content : [])),
+    ].filter((b: any) => b.cache_control != null).length + (body.cache_control != null ? 1 : 0);
+
+  const bodyWithMarkers = (): any => ({
+    tools: [{ name: "Read", input_schema: {} }],
+    system: [
+      { type: "text", text: "x-anthropic-billing-header: cc_version=1;" },
+      { type: "text", text: "Captured Claude Code prompt part 1", cache_control: { ...eph } },
+      { type: "text", text: "Captured Claude Code prompt part 2", cache_control: { ...eph } },
+      { type: "text", text: "OpenCode system", cache_control: { ...eph } },
+      { type: "text", text: "AGENTS.md" },
+    ],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "assistant", content: [{ type: "text", text: "reply", cache_control: { ...eph } }] },
+      { role: "user", content: [{ type: "text", text: "latest", cache_control: { ...eph } }] },
+    ],
+  });
+
+  it("caps markers at 4, keeping the system end and the latest message markers", () => {
+    const body = bodyWithMarkers();
+    applyCacheBreakpoints(body);
+    assert.equal(countMarkers(body), 4);
+    assert.deepEqual(body.system[4].cache_control, eph);
+    assert.deepEqual(body.messages[1].content[0].cache_control, eph);
+    assert.deepEqual(body.messages[2].content[0].cache_control, eph);
+    // Earliest markers are the ones dropped.
+    assert.equal(body.system[1].cache_control, undefined);
+  });
+
+  it("keeps a text-block marker in the last message", () => {
+    const body = {
+      system: [{ type: "text", text: "prompt" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { ...eph } }] }],
+    };
+    applyCacheBreakpoints(body);
+    assert.deepEqual(body.messages[0].content[0].cache_control, eph);
+    assert.deepEqual((body.system[0] as any).cache_control, eph);
+  });
+
+  it("counts a top-level cache_control toward the limit", () => {
+    const body: any = { ...bodyWithMarkers(), cache_control: { ...eph } };
+    applyCacheBreakpoints(body);
+    assert.equal(countMarkers(body), 4);
+    assert.deepEqual(body.system[4].cache_control, eph);
+    assert.deepEqual(body.messages[2].content[0].cache_control, eph);
+  });
+
+  it("uses a 1h ttl for the system breakpoint when another marker does", () => {
+    const body = {
+      system: [{ type: "text", text: "prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral", ttl: "1h" } }] },
+      ],
+    };
+    applyCacheBreakpoints(body);
+    assert.deepEqual((body.system[0] as any).cache_control, { type: "ephemeral", ttl: "1h" });
+  });
+
+  it("skips empty system blocks and tolerates a missing system", () => {
+    const body = { system: [{ type: "text", text: "prompt" }, { type: "text", text: "" }] };
+    applyCacheBreakpoints(body);
+    assert.deepEqual((body.system[0] as any).cache_control, eph);
+    assert.equal((body.system[1] as any).cache_control, undefined);
+
+    const empty: any = { messages: [{ role: "user", content: "hi" }] };
+    applyCacheBreakpoints(empty);
+    assert.equal(countMarkers(empty), 0);
+  });
+
+  it("the http.request hook sends at most 4 markers and caches the system prompt", async () => {
+    const callbacks = new Map<string, (event: any) => unknown>();
+    const ctx = {
+      integration: {
+        transform: async (editor: (editor: { method: { update(r: unknown): void } }) => void) => {
+          editor({ method: { update() {} } });
+        },
+        connection: { active: async () => undefined, resolve: async () => undefined },
+      },
+      session: {
+        hook: async (name: string, cb: (event: any) => unknown) => {
+          callbacks.set(name, cb);
+        },
+      },
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network disabled in tests");
+    }) as typeof globalThis.fetch;
+    try {
+      await (pluginModule.setup as (c: unknown) => Promise<unknown>)(ctx);
+      const { tools: _tools, ...rest } = bodyWithMarkers();
+      const event = {
+        request: new Request("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { authorization: "Bearer tok" },
+          body: JSON.stringify({ model: "claude-opus-4-7", ...rest }),
+        }),
+      };
+      await callbacks.get("http.request")!(event);
+      const sent = JSON.parse(await event.request.text());
+      assert.ok(countMarkers(sent) <= 4, `sent ${countMarkers(sent)} markers`);
+      assert.ok(sent.system.at(-1).cache_control, "last system block must be a breakpoint");
+      assert.ok(sent.messages.at(-1).content.at(-1).cache_control, "latest message marker must survive");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
 

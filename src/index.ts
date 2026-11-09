@@ -192,6 +192,57 @@ export function stripSystemCacheControl(
   });
 }
 
+/** Anthropic rejects requests with more than this many cache breakpoints. */
+export const MAX_CACHE_BREAKPOINTS = 4;
+
+/**
+ * Cap prompt-cache breakpoints at MAX_CACHE_BREAKPOINTS instead of stripping
+ * them, so caching keeps working:
+ *
+ * - The last non-empty system block always gets a breakpoint: it caches tools
+ *   + the whole (stable) system prompt, the biggest invariant prefix.
+ * - Over the limit, the earliest markers are dropped first. The system-end
+ *   breakpoint and the latest message markers (which carry the cache from one
+ *   turn to the next) survive. A top-level `cache_control` uses one slot.
+ * - The added breakpoint uses ttl "1h" when any other marker does, since a
+ *   1h marker may not follow a 5m one.
+ */
+export function applyCacheBreakpoints(parsed: any): void {
+  type Holder = Record<string, unknown>;
+  const isObject = (v: unknown): v is Holder => !!v && typeof v === "object";
+  const tools: Holder[] = Array.isArray(parsed.tools) ? parsed.tools.filter(isObject) : [];
+  const system: Holder[] = Array.isArray(parsed.system) ? parsed.system.filter(isObject) : [];
+  const messageBlocks: Holder[] = [];
+  if (Array.isArray(parsed.messages)) {
+    for (const msg of parsed.messages) {
+      if (Array.isArray(msg?.content)) messageBlocks.push(...msg.content.filter(isObject));
+    }
+  }
+  // Prefix order: tools → system → messages.
+  const ordered = [...tools, ...system, ...messageBlocks];
+  const marked = () => ordered.filter((b) => b.cache_control != null);
+
+  const systemEnd = [...system]
+    .reverse()
+    .find((b) => b.type === "text" && typeof b.text === "string" && b.text.length > 0);
+  if (systemEnd && systemEnd.cache_control == null) {
+    const usesHourTtl = marked().some(
+      (b) => isObject(b.cache_control) && b.cache_control.ttl === "1h",
+    ) || (isObject(parsed.cache_control) && parsed.cache_control.ttl === "1h");
+    systemEnd.cache_control = usesHourTtl ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+  }
+
+  const budget = MAX_CACHE_BREAKPOINTS - (parsed.cache_control != null ? 1 : 0);
+  const current = marked();
+  let excess = current.length - budget;
+  for (const block of current) {
+    if (excess <= 0) break;
+    if (block === systemEnd) continue;
+    delete block.cache_control;
+    excess--;
+  }
+}
+
 export function shouldInjectClaudeTools(input: {
   model?: string;
   requestUrl?: string;
@@ -719,8 +770,6 @@ async function transformClaudeRequestBody(
     // Otherwise keep the existing prompt but shape it closer to Claude Code.
     parsed.system = normalizeSystemBlocks(parsed.system);
   }
-  parsed.system = stripSystemCacheControl(parsed.system);
-
   // Keep OpenCode's default tool schemas for non-Claude targets.
   // Claude wire schemas are only useful for Anthropic-native
   // requests or Claude-family models on Anthropic-compatible
@@ -741,7 +790,6 @@ async function transformClaudeRequestBody(
       for (const block of msg.content) {
         if (block.type === "text" && typeof block.text === "string") {
           block.text = maybeUnquoteText(block.text);
-          delete block.cache_control;
         }
         if (block.type === "tool_use" && block.name) {
           block.name = mapOutboundToolName(block.name);
@@ -762,6 +810,8 @@ async function transformClaudeRequestBody(
       }
     }
   }
+
+  applyCacheBreakpoints(parsed);
 
   return { inboundToolNameMap };
 }

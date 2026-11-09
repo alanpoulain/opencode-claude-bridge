@@ -16,6 +16,9 @@
 - `resolveOAuthAccessToken` only falls back to the Claude CLI token when
   nothing signals API-key auth: an `x-api-key` header or an active non-OAuth
   connection means passthrough, never an OAuth takeover.
+- Prompt-cache markers are capped at 4 by `applyCacheBreakpoints` (last
+  system block always marked, earliest markers dropped first) — never strip
+  them wholesale, which silently disables caching.
 - System-prompt hooks must be registered on every kind in
   `SYSTEM_PROMPT_HOOKS` (`context`, `compaction`, `generate`, `title`) —
   OpenCode dispatches each request kind to its own hook.
