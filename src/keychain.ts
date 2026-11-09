@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -24,8 +25,26 @@ export type ClaudeCliTokens = OAuthTokens & { source: CredentialSource };
 
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
 
-function credentialsFilePath(): string {
-  return join(homedir(), ".claude", ".credentials.json");
+/** The Claude CLI config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`. Read at call time. */
+export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+}
+
+export function credentialsFilePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(claudeConfigDir(env), ".credentials.json");
+}
+
+/**
+ * Keychain services to look in, most specific first. With `CLAUDE_CONFIG_DIR`
+ * set, the Claude CLI stores credentials under a service suffixed with the
+ * first 8 hex chars of sha256(dir); the plain service stays as a fallback for
+ * CLI versions that don't suffix.
+ */
+export function keychainServiceNames(env: NodeJS.ProcessEnv = process.env): string[] {
+  const dir = env.CLAUDE_CONFIG_DIR;
+  if (!dir) return [KEYCHAIN_SERVICE];
+  const suffix = createHash("sha256").update(dir).digest("hex").slice(0, 8);
+  return [`${KEYCHAIN_SERVICE}-${suffix}`, KEYCHAIN_SERVICE];
 }
 
 /**
@@ -50,8 +69,8 @@ export function selectClaudeCredentials(
 }
 
 /** Raw contents of one Keychain item, optionally scoped to an account. */
-function readKeychainRaw(account?: string): string | null {
-  const args = ["find-generic-password", "-s", KEYCHAIN_SERVICE];
+function readKeychainRaw(service: string, account?: string): string | null {
+  const args = ["find-generic-password", "-s", service];
   if (account) args.push("-a", account);
   args.push("-w");
   try {
@@ -70,8 +89,8 @@ function readKeychainRaw(account?: string): string | null {
 }
 
 /** Read one Keychain item, optionally scoped to an account. */
-function readKeychainItem(account?: string): KeychainCredentials | null {
-  const raw = readKeychainRaw(account);
+function readKeychainItem(service: string, account?: string): KeychainCredentials | null {
+  const raw = readKeychainRaw(service, account);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as KeychainCredentials;
@@ -91,28 +110,31 @@ function currentUsername(): string | undefined {
 
 /**
  * Read Claude CLI credentials and where they came from: the macOS Keychain,
- * falling back to ~/.claude/.credentials.json (the only store elsewhere).
+ * falling back to `<config dir>/.credentials.json` (the only store elsewhere).
+ * Both honor `CLAUDE_CONFIG_DIR`.
  */
 export function readClaudeCredentialsWithSource():
   | { credentials: KeychainCredentials; source: CredentialSource }
   | null {
   if (process.platform === "darwin") {
     const account = currentUsername();
-    // Scoped lookup first (Claude Code stores under the current account), then
-    // the historical unscoped lookup so anyone whose item lives under a
-    // different account name keeps working exactly as before.
-    const scoped = account ? readKeychainItem(account) : null;
-    const unscoped = readKeychainItem();
-    const found = selectClaudeCredentials([scoped, unscoped]);
-    if (found) {
-      return {
-        credentials: found,
-        source: {
-          kind: "keychain",
-          service: KEYCHAIN_SERVICE,
-          account: found === scoped ? account : undefined,
-        },
-      };
+    for (const service of keychainServiceNames()) {
+      // Scoped lookup first (Claude Code stores under the current account),
+      // then the historical unscoped lookup so anyone whose item lives under
+      // a different account name keeps working exactly as before.
+      const scoped = account ? readKeychainItem(service, account) : null;
+      const unscoped = readKeychainItem(service);
+      const found = selectClaudeCredentials([scoped, unscoped]);
+      if (found) {
+        return {
+          credentials: found,
+          source: {
+            kind: "keychain",
+            service,
+            account: found === scoped ? account : undefined,
+          },
+        };
+      }
     }
     // Deliberately fall through when the Keychain had matches but none carried
     // claudeAiOauth. Returning such an item made the credentials-file fallback
@@ -130,7 +152,7 @@ export function readClaudeCredentialsWithSource():
 
 /**
  * Read Claude CLI credentials from macOS Keychain.
- * Falls back to ~/.claude/.credentials.json on other platforms.
+ * Falls back to `<config dir>/.credentials.json` on other platforms.
  */
 export function readClaudeCredentials(): KeychainCredentials | null {
   return readClaudeCredentialsWithSource()?.credentials ?? null;
@@ -254,7 +276,7 @@ function writeBackKeychain(
   fresh: OAuthTokens,
 ): boolean {
   try {
-    const raw = readKeychainRaw(source.account);
+    const raw = readKeychainRaw(source.service, source.account);
     if (!raw) return false;
     const updated = updateCredentialBlob(raw, spentRefreshToken, fresh);
     if (!updated) return false;
@@ -268,7 +290,7 @@ function writeBackKeychain(
       stdio: ["pipe", "ignore", "ignore"],
     });
     // `security -i` can exit 0 when the command inside failed; verify.
-    const written = readKeychainRaw(account);
+    const written = readKeychainRaw(source.service, account);
     if (!written) return false;
     return (JSON.parse(written) as KeychainCredentials).claudeAiOauth?.refreshToken === fresh.refresh;
   } catch {

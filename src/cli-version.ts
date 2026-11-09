@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { credentialsFilePath } from "./keychain.js";
 import {
   CLI_VERSION_CACHE_PATH,
   CLI_VERSION_CACHE_TTL_MS,
@@ -31,8 +31,7 @@ function detectLocalClaudeVersion(): string | null {
   } catch {}
   // Credentials file written by the Claude CLI
   try {
-    const credPath = join(homedir(), ".claude", ".credentials.json");
-    const raw = readFileSync(credPath, "utf8");
+    const raw = readFileSync(credentialsFilePath(), "utf8");
     const parsed = JSON.parse(raw);
     if (parsed.version && typeof parsed.version === "string") {
       return parsed.version;

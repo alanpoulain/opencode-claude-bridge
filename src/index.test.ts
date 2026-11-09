@@ -20,6 +20,10 @@ import {
 import { extractOAuthErrorDetail, parseTokenResponse } from "./oauth.js";
 import {
   buildKeychainWriteCommand,
+  claudeConfigDir,
+  credentialsFilePath,
+  keychainServiceNames,
+  readClaudeCliTokens,
   selectClaudeCredentials,
   updateCredentialBlob,
   writeBackCredentialsFile,
@@ -47,7 +51,8 @@ import {
 import { createSseProcessor, parseSseEvent, buildSseEvent } from "./stream.js";
 import { fetchCliVersion, parseDistTagsVersion } from "./cli-version.js";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 const CLAUDE_PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
@@ -1654,6 +1659,47 @@ describe("refreshCredentialLayered", () => {
     const result = refreshCredentialLayered({ refresh: "shared-r" }, h.deps);
     assert.equal(result?.refresh, "new-r-shared-r");
     assert.equal(h.warnings.length, 1);
+  });
+});
+
+describe("CLAUDE_CONFIG_DIR", () => {
+  it("defaults to ~/.claude", () => {
+    assert.equal(claudeConfigDir({}), join(homedir(), ".claude"));
+    assert.equal(credentialsFilePath({}), join(homedir(), ".claude", ".credentials.json"));
+    assert.deepEqual(keychainServiceNames({}), ["Claude Code-credentials"]);
+  });
+
+  it("uses the configured dir and its suffixed Keychain service first", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/Users/me/.claude-work" };
+    assert.equal(credentialsFilePath(env), "/Users/me/.claude-work/.credentials.json");
+    const suffix = createHash("sha256").update("/Users/me/.claude-work").digest("hex").slice(0, 8);
+    assert.deepEqual(keychainServiceNames(env), [
+      `Claude Code-credentials-${suffix}`,
+      "Claude Code-credentials",
+    ]);
+  });
+
+  it("reads the CLI credentials file from the configured dir", { skip: process.platform === "darwin" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocb-config-"));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      writeFileSync(
+        join(dir, ".credentials.json"),
+        JSON.stringify({ claudeAiOauth: { accessToken: "a", refreshToken: "r", expiresAt: 123.9 } }),
+      );
+      process.env.CLAUDE_CONFIG_DIR = dir;
+      const tokens = readClaudeCliTokens();
+      assert.deepEqual(tokens, {
+        access: "a",
+        refresh: "r",
+        expires: 123,
+        source: { kind: "file", path: join(dir, ".credentials.json") },
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
