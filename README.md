@@ -175,13 +175,13 @@ All OAuth and header parameters can be overridden via environment variables:
 |---|---|---|
 | `ANTHROPIC_CLIENT_ID` | `9d1c250a-...` | OAuth client ID |
 | `ANTHROPIC_TOKEN_URL` | `https://platform.claude.com/v1/oauth/token` | Token endpoint |
-| `ANTHROPIC_AUTHORIZE_URL` | `https://claude.ai/oauth/authorize` | Authorization endpoint |
+| `ANTHROPIC_AUTHORIZE_URL` | `https://claude.com/cai/oauth/authorize` | Authorization endpoint |
 | `ANTHROPIC_CLI_VERSION` | `claude --version`, else the npm `stable` tag (cached 24h in `~/.cache/opencode-claude-bridge/cli-version.json`), else `2.1.319` | Claude CLI version string |
 | `ANTHROPIC_CLI_VERSION_TAG` | `stable` | npm dist-tag of `@anthropic-ai/claude-code` to follow (`stable`, `latest`, `next`) |
 | `ANTHROPIC_CLI_VERSION_URL` | `https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags` | Registry endpoint for the version lookup |
 | `ANTHROPIC_CLI_BUILD_ID` | `835` | Build ID for headers |
 | `ANTHROPIC_ENTRYPOINT` | `sdk-cli` | Entrypoint value for billing |
-| `ANTHROPIC_SDK_VERSION` | `0.94.0` | Stainless SDK version |
+| `ANTHROPIC_SDK_VERSION` | `0.128.0` | Stainless SDK version |
 | `ANTHROPIC_BETA_FLAGS` | Current Claude Code beta flags | Comma-separated beta feature flags |
 | `ANTHROPIC_BILLING_CCH` | (computed) | Client attestation hash override |
 | `ANTHROPIC_SYSTEM_PROMPT_PATH` | `~/.cache/opencode-claude-bridge/claude-system-prompt.json` | Path to cached system prompt |

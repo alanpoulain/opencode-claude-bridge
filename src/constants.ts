@@ -31,7 +31,7 @@ export const CLIENT_ID =
 
 export const PROFILE_URL =
   process.env.ANTHROPIC_PROFILE_URL ||
-  "https://claude.ai/api/oauth/profile";
+  "https://api.anthropic.com/api/oauth/profile";
 
 export const TOKEN_URL =
   process.env.ANTHROPIC_TOKEN_URL ||
@@ -39,7 +39,7 @@ export const TOKEN_URL =
 
 export const AUTHORIZE_URL =
   process.env.ANTHROPIC_AUTHORIZE_URL ||
-  "https://claude.ai/oauth/authorize";
+  "https://claude.com/cai/oauth/authorize";
 
 // Manual redirect URL — used when the local server can't receive the callback
 // (e.g., user copies the code from the browser). This matches Claude CLI's
@@ -52,7 +52,7 @@ export const MANUAL_REDIRECT_URL =
 // ALL_OAUTH_SCOPES. Includes org:create_api_key for Console -> Claude.ai redirect.
 export const SCOPES =
   process.env.ANTHROPIC_SCOPES ||
-  "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+  "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
 
 export const CLI_BUILD_ID =
   process.env.ANTHROPIC_CLI_BUILD_ID || "835";
@@ -71,6 +71,9 @@ export const ENTRYPOINT =
 // supportsThinkingBlockBinding (claude-haiku-5-5, opus/sonnet/fable 5.x).
 // Without this flag those requests fail validation with:
 //   "thinking.adaptive.block_binding: Extra inputs are not permitted"
+// 2026-11-09: checked against Claude Code 2.1.319. Every flag still exists;
+// the CLI sends advisor-tool, thinking-binding-controls and extended-cache-ttl
+// only conditionally (advisor model set, block_binding sent, 1h cache TTL).
 // To refresh this list against a newer Claude Code install:
 //   grep -aoE '"[a-z]+(-[a-z]+)*-20[0-9]{2}-[0-9]{2}-[0-9]{2}"' \
 //     "$(readlink -f "$(command -v claude)")" | sort -u
@@ -86,7 +89,7 @@ export const ANTHROPIC_VERSION = "2023-06-01";
 // Stainless SDK headers (matches what Claude Code's bundled SDK sends)
 export const STAINLESS_HEADERS: Record<string, string> = {
   "x-stainless-lang": "js",
-  "x-stainless-package-version": process.env.ANTHROPIC_SDK_VERSION || "0.94.0",
+  "x-stainless-package-version": process.env.ANTHROPIC_SDK_VERSION || "0.128.0",
   "x-stainless-os": process.platform === "darwin" ? "MacOS" : process.platform === "linux" ? "Linux" : "Windows",
   "x-stainless-arch": process.arch === "arm64" ? "arm64" : process.arch,
   "x-stainless-runtime": "node",
