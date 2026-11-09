@@ -1279,6 +1279,29 @@ describe("mergeSystemBlocks", () => {
     assert.equal(out[out.length - 1].text, "opencode prompt");
   });
 
+  it("strips the context-hook CLAUDE_PREFIX from OpenCode's blocks when the Claude prompt has it", () => {
+    const prefix = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+    const claudeWithPrefix = [{ type: "text", text: `${prefix}\n\nClaude Code instructions.` }];
+    const opencode = [{ type: "text", text: `${prefix}\n\nInstructions from: AGENTS.md` }];
+    const out = mergeSystemBlocks(billing, claudeWithPrefix, opencode);
+    const occurrences = out.filter((b) => b.text?.includes(prefix)).length;
+    assert.equal(occurrences, 1);
+    assert.equal(out[out.length - 1].text, "Instructions from: AGENTS.md");
+  });
+
+  it("drops a bare CLAUDE_PREFIX block when the Claude prompt has it", () => {
+    const prefix = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+    const claudeWithPrefix = [{ type: "text", text: prefix }];
+    const out = mergeSystemBlocks(billing, claudeWithPrefix, [{ type: "text", text: prefix }]);
+    assert.equal(out.length, 2);
+  });
+
+  it("keeps the prefix on OpenCode's blocks when the Claude prompt lacks it", () => {
+    const prefix = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+    const opencode = [{ type: "text", text: `${prefix}\n\nInstructions from: AGENTS.md` }];
+    const out = mergeSystemBlocks(billing, claude, opencode);
+    assert.equal(out[out.length - 1].text, `${prefix}\n\nInstructions from: AGENTS.md`);
+  });
 });
 
 describe("plugin module shape", () => {

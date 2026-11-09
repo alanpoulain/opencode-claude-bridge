@@ -129,19 +129,33 @@ export function rewriteSystemBlocksForModel(
  * cached: billing header, then the Claude Code blocks, then OpenCode's own
  * system blocks (which carry AGENTS.md, environment info and skills). Any
  * billing block already present in OpenCode's system is dropped so the
- * header appears exactly once.
+ * header appears exactly once. When the Claude Code blocks already carry
+ * CLAUDE_PREFIX, the copy the `context` hook prepended to OpenCode's system
+ * is stripped so the identity line isn't sent twice.
  */
 export function mergeSystemBlocks(
   billingHeader: string,
   claudeSystem: Array<{ type?: string; text?: string }>,
   opencodeSystem: Array<{ type?: string; text?: string }>,
 ): Array<{ type?: string; text?: string }> {
+  const claudeHasPrefix = claudeSystem.some(
+    (block) => typeof block?.text === "string" && block.text.includes(CLAUDE_PREFIX),
+  );
+  const opencode = opencodeSystem
+    .filter((block) => !block?.text?.startsWith("x-anthropic-billing-header:"))
+    .map((block) => {
+      if (!claudeHasPrefix || typeof block?.text !== "string") return block;
+      if (block.text.startsWith(`${CLAUDE_PREFIX}\n\n`)) {
+        return { ...block, text: block.text.slice(`${CLAUDE_PREFIX}\n\n`.length) };
+      }
+      if (block.text === CLAUDE_PREFIX) return { ...block, text: "" };
+      return block;
+    })
+    .filter((block) => block?.text !== "");
   return [
     { type: "text", text: billingHeader },
     ...claudeSystem,
-    ...opencodeSystem.filter(
-      (block) => !block?.text?.startsWith("x-anthropic-billing-header:"),
-    ),
+    ...opencode,
   ];
 }
 
