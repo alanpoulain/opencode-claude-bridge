@@ -124,6 +124,27 @@ export function rewriteSystemBlocksForModel(
   });
 }
 
+/**
+ * Build the outbound system prompt when a captured Claude Code prompt is
+ * cached: billing header, then the Claude Code blocks, then OpenCode's own
+ * system blocks (which carry AGENTS.md, environment info and skills). Any
+ * billing block already present in OpenCode's system is dropped so the
+ * header appears exactly once.
+ */
+export function mergeSystemBlocks(
+  billingHeader: string,
+  claudeSystem: Array<{ type?: string; text?: string }>,
+  opencodeSystem: Array<{ type?: string; text?: string }>,
+): Array<{ type?: string; text?: string }> {
+  return [
+    { type: "text", text: billingHeader },
+    ...claudeSystem,
+    ...opencodeSystem.filter(
+      (block) => !block?.text?.startsWith("x-anthropic-billing-header:"),
+    ),
+  ];
+}
+
 export function stripSystemCacheControl(
   system: Array<{ type?: string; text?: string; cache_control?: unknown }>,
 ): Array<{ type?: string; text?: string }> {
@@ -570,16 +591,14 @@ async function transformClaudeRequestBody(
     billingHeader = parsed.system[0]?.text || billingHeader;
   }
 
-  // If we have a locally captured Claude Code system prompt, prefer it.
+  // If we have a locally captured Claude Code system prompt, lead with it but
+  // keep OpenCode's system blocks (AGENTS.md, env, skills) after it.
   if (opts.cachedClaudeSystem) {
     const rewritten = rewriteSystemBlocksForModel(
       opts.cachedClaudeSystem,
       typeof parsed.model === "string" ? parsed.model : undefined,
     );
-    parsed.system = [
-      { type: "text", text: billingHeader },
-      ...rewritten,
-    ];
+    parsed.system = mergeSystemBlocks(billingHeader, rewritten, parsed.system);
   } else if (parsed.system && Array.isArray(parsed.system)) {
     // Otherwise keep the existing prompt but shape it closer to Claude Code.
     parsed.system = normalizeSystemBlocks(parsed.system);

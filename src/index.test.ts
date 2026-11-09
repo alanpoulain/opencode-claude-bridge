@@ -25,6 +25,7 @@ import {
   getClaudeToolsForActiveOpenCodeTools,
   getInboundToolNameMapForActiveOpenCodeTools,
   mapOutboundToolName,
+  mergeSystemBlocks,
   rewriteSystemBlocksForModel,
   shouldInjectClaudeTools,
   stripAssistantPrefillForClaude,
@@ -1250,6 +1251,34 @@ describe("rewriteSystemBlocksForModel", () => {
     assert.deepEqual(out[0], nonText);
     assert.equal(out[1].text, "no identity line here");
   });
+});
+
+describe("mergeSystemBlocks", () => {
+  const billing = "x-anthropic-billing-header: cc_version=2.1.0; cc_entrypoint=cli; cch=00000;";
+  const claude = [{ type: "text", text: "You are Claude Code." }];
+
+  it("keeps OpenCode's system blocks (e.g. AGENTS.md) after the Claude Code prompt", () => {
+    const opencode = [{ type: "text", text: "Instructions from: AGENTS.md\nBe terse." }];
+    const out = mergeSystemBlocks(billing, claude, opencode);
+    assert.deepEqual(out.map((b) => b.text), [
+      billing,
+      "You are Claude Code.",
+      "Instructions from: AGENTS.md\nBe terse.",
+    ]);
+  });
+
+  it("emits the billing header exactly once", () => {
+    const opencode = [
+      { type: "text", text: billing },
+      { type: "text", text: "opencode prompt" },
+    ];
+    const out = mergeSystemBlocks(billing, claude, opencode);
+    const billingBlocks = out.filter((b) => b.text?.startsWith("x-anthropic-billing-header:"));
+    assert.equal(billingBlocks.length, 1);
+    assert.equal(out[0].text, billing);
+    assert.equal(out[out.length - 1].text, "opencode prompt");
+  });
+
 });
 
 describe("plugin module shape", () => {
