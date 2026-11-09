@@ -185,7 +185,7 @@ All OAuth and header parameters can be overridden via environment variables:
 | `ANTHROPIC_BETA_FLAGS` | Current Claude Code beta flags | Comma-separated beta feature flags |
 | `ANTHROPIC_BILLING_CCH` | (computed) | Client attestation hash override |
 | `ANTHROPIC_SYSTEM_PROMPT_PATH` | `~/.cache/opencode-claude-bridge/claude-system-prompt.json` | Path to cached system prompt |
-| `ANTHROPIC_DEFAULT_EFFORT` | `medium` | Thinking effort level |
+| `ANTHROPIC_DEFAULT_EFFORT` | (unset) | Effort sent when the request doesn't set one; unset sends none, like Claude Code |
 | `ANTHROPIC_THINKING_DISPLAY` | `summarized` | `thinking.display` sent when the request doesn't set one (`omitted` hides thinking text) |
 | `ANTHROPIC_SESSION_ID` | (generated) | Override session ID |
 

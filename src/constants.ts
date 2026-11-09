@@ -96,8 +96,10 @@ export const STAINLESS_HEADERS: Record<string, string> = {
   "x-stainless-runtime-version": process.version,
 };
 
+// Empty by default: like Claude Code, send no output_config.effort unless one
+// is set, so the API applies the model's own default.
 export const DEFAULT_EFFORT =
-  process.env.ANTHROPIC_DEFAULT_EFFORT || "medium";
+  process.env.ANTHROPIC_DEFAULT_EFFORT || "";
 
 // Newer models (Opus 4.7+, all 5.x) default thinking.display to "omitted",
 // which returns thinking blocks with empty text, so OpenCode has nothing to

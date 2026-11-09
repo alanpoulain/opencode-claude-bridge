@@ -788,7 +788,7 @@ async function transformClaudeRequestBody(
         edits: [{ type: CLEAR_THINKING_TYPE, keep: "all" }],
       };
     }
-    if (!parsed.output_config) {
+    if (!parsed.output_config && DEFAULT_EFFORT) {
       parsed.output_config = { effort: DEFAULT_EFFORT };
     }
   }
