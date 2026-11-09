@@ -8,6 +8,11 @@
   1.11.x releases.
 - Never rotate Claude refresh tokens outside the integration `refresh`
   callback — they are single-use and only that callback's result is persisted.
+  `getClaudeTokens()` is read-only. Whenever the callback spends the Claude
+  CLI's refresh token, the rotation must be written back to the CLI store
+  (`writeBackClaudeCredentials`, compare-and-swap on the spent token) or the
+  CLI is left holding a dead token. The macOS Keychain write goes through
+  `security -i` on stdin (`-X` hex) so the secret never appears in argv.
 - `resolveOAuthAccessToken` only falls back to the Claude CLI token when
   nothing signals API-key auth: an `x-api-key` header or an active non-OAuth
   connection means passthrough, never an OAuth takeover.

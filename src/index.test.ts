@@ -18,7 +18,13 @@ import {
   shouldUseClaudeToolSchemas,
 } from "./claude-tools.js";
 import { extractOAuthErrorDetail, parseTokenResponse } from "./oauth.js";
-import { selectClaudeCredentials } from "./keychain.js";
+import {
+  buildKeychainWriteCommand,
+  selectClaudeCredentials,
+  updateCredentialBlob,
+  writeBackCredentialsFile,
+} from "./keychain.js";
+import type { ClaudeCliTokens, CredentialSource } from "./keychain.js";
 import {
   default as pluginModule,
   applyThinkingConfig,
@@ -28,6 +34,7 @@ import {
   mapOutboundToolName,
   injectClaudePrefix,
   mergeSystemBlocks,
+  refreshCredentialLayered,
   resolveOAuthAccessToken,
   rewriteSystemBlocksForModel,
   shouldInjectClaudeTools,
@@ -36,7 +43,7 @@ import {
 } from "./index.js";
 import { createSseProcessor, parseSseEvent, buildSseEvent } from "./stream.js";
 import { fetchCliVersion, parseDistTagsVersion } from "./cli-version.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1537,6 +1544,192 @@ describe("http hooks: per-request OAuth tracking", () => {
       const original = sse();
       assert.equal(await hooks.response(new Request(url, { method: "POST" }), original), original);
     });
+  });
+});
+
+describe("refreshCredentialLayered", () => {
+  const HOUR = 3_600_000;
+  const fileSource: CredentialSource = { kind: "file", path: "/tmp/creds.json" };
+  const cliTokens = (refresh: string, expires: number): ClaudeCliTokens => ({
+    access: `access-${refresh}`,
+    refresh,
+    expires,
+    source: fileSource,
+  });
+  const fresh = (from: string) => ({ access: `new-a-${from}`, refresh: `new-r-${from}`, expires: Date.now() + HOUR });
+
+  function harness(opts: {
+    cli?: Array<ClaudeCliTokens | null>;
+    refresh?: (token: string) => { access: string; refresh: string; expires: number };
+    writeBack?: boolean;
+  }) {
+    const reads = [...(opts.cli ?? [null])];
+    const refreshed: string[] = [];
+    const writes: Array<{ spent: string; refresh: string }> = [];
+    const warnings: string[] = [];
+    const deps = {
+      readCli: () => (reads.length > 1 ? reads.shift()! : reads[0]),
+      refresh: (token: string) => {
+        refreshed.push(token);
+        return (opts.refresh ?? fresh)(token);
+      },
+      writeBack: (_source: CredentialSource, spent: string, tokens: { refresh: string }) => {
+        writes.push({ spent, refresh: tokens.refresh });
+        return opts.writeBack ?? true;
+      },
+      warn: (m: string) => warnings.push(m),
+    };
+    return { deps, refreshed, writes, warnings };
+  }
+
+  it("adopts a valid CLI access token without refreshing", () => {
+    const h = harness({ cli: [cliTokens("cli-r", Date.now() + HOUR)] });
+    const result = refreshCredentialLayered({ refresh: "stored-r" }, h.deps);
+    assert.equal(result?.access, "access-cli-r");
+    assert.deepEqual(h.refreshed, []);
+  });
+
+  it("writes back after spending a refresh token shared with the CLI", () => {
+    const h = harness({ cli: [cliTokens("shared-r", Date.now() - 1)] });
+    const result = refreshCredentialLayered({ refresh: "shared-r" }, h.deps);
+    assert.equal(result?.refresh, "new-r-shared-r");
+    assert.deepEqual(h.refreshed, ["shared-r"]);
+    assert.deepEqual(h.writes, [{ spent: "shared-r", refresh: "new-r-shared-r" }]);
+  });
+
+  it("does not write back when the stored token is not the CLI's", () => {
+    const h = harness({ cli: [cliTokens("cli-r", Date.now() - 1)] });
+    const result = refreshCredentialLayered({ refresh: "browser-r" }, h.deps);
+    assert.equal(result?.refresh, "new-r-browser-r");
+    assert.deepEqual(h.writes, []);
+  });
+
+  it("falls back to the CLI token and writes it back", () => {
+    const h = harness({
+      cli: [cliTokens("cli-r", Date.now() - 1)],
+      refresh: (token) => {
+        if (token === "stored-r") throw new Error("invalid_grant");
+        return fresh(token);
+      },
+    });
+    const result = refreshCredentialLayered({ refresh: "stored-r" }, h.deps);
+    assert.equal(result?.refresh, "new-r-cli-r");
+    assert.deepEqual(h.refreshed, ["stored-r", "cli-r"]);
+    assert.deepEqual(h.writes, [{ spent: "cli-r", refresh: "new-r-cli-r" }]);
+  });
+
+  it("adopts tokens another refresher just rotated", () => {
+    const h = harness({
+      cli: [cliTokens("shared-r", Date.now() - 1), cliTokens("rotated-r", Date.now() + HOUR)],
+      refresh: () => {
+        throw new Error("invalid_grant");
+      },
+    });
+    const result = refreshCredentialLayered({ refresh: "shared-r" }, h.deps);
+    assert.equal(result?.refresh, "rotated-r");
+    assert.deepEqual(h.refreshed, ["shared-r"]);
+    assert.deepEqual(h.writes, []);
+  });
+
+  it("throws the last error when every refresh fails", () => {
+    const h = harness({
+      cli: [cliTokens("cli-r", Date.now() - 1)],
+      refresh: (token) => {
+        throw new Error(`failed ${token}`);
+      },
+    });
+    assert.throws(() => refreshCredentialLayered({ refresh: "stored-r" }, h.deps), /failed cli-r/);
+  });
+
+  it("returns null when there is nothing to refresh with", () => {
+    const h = harness({});
+    assert.equal(refreshCredentialLayered({}, h.deps), null);
+  });
+
+  it("still returns fresh tokens when the write-back fails", () => {
+    const h = harness({ cli: [cliTokens("shared-r", Date.now() - 1)], writeBack: false });
+    const result = refreshCredentialLayered({ refresh: "shared-r" }, h.deps);
+    assert.equal(result?.refresh, "new-r-shared-r");
+    assert.equal(h.warnings.length, 1);
+  });
+});
+
+describe("Claude CLI credential write-back", () => {
+  const blob = (refreshToken: string) =>
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "old-a",
+        refreshToken,
+        expiresAt: 1,
+        scopes: ["user:inference"],
+        subscriptionType: "max",
+      },
+      other: { keep: true },
+    });
+  const tokens = { access: "new-a", refresh: "new-r", expires: 42 };
+
+  it("updateCredentialBlob swaps tokens and keeps other fields", () => {
+    const updated = JSON.parse(updateCredentialBlob(blob("spent-r"), "spent-r", tokens)!);
+    assert.deepEqual(updated, {
+      claudeAiOauth: {
+        accessToken: "new-a",
+        refreshToken: "new-r",
+        expiresAt: 42,
+        scopes: ["user:inference"],
+        subscriptionType: "max",
+      },
+      other: { keep: true },
+    });
+  });
+
+  it("updateCredentialBlob refuses a blob rotated by someone else", () => {
+    assert.equal(updateCredentialBlob(blob("other-r"), "spent-r", tokens), null);
+    assert.equal(updateCredentialBlob("{not json", "spent-r", tokens), null);
+  });
+
+  const withTempDir = (run: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocb-creds-"));
+    try {
+      run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("writes the file atomically with mode 0600 when the token matches", () => {
+    withTempDir((dir) => {
+      const path = join(dir, ".credentials.json");
+      writeFileSync(path, blob("spent-r"), { mode: 0o644 });
+      assert.equal(writeBackCredentialsFile(path, "spent-r", tokens), true);
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).claudeAiOauth.refreshToken, "new-r");
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.deepEqual(readdirSync(dir), [".credentials.json"]);
+    });
+  });
+
+  it("leaves the file alone when the token no longer matches", () => {
+    withTempDir((dir) => {
+      const path = join(dir, ".credentials.json");
+      writeFileSync(path, blob("other-r"));
+      assert.equal(writeBackCredentialsFile(path, "spent-r", tokens), false);
+      assert.equal(readFileSync(path, "utf8"), blob("other-r"));
+      assert.deepEqual(readdirSync(dir), [".credentials.json"]);
+    });
+  });
+
+  it("builds a security -i command with the secret hex-encoded", () => {
+    const secret = blob("new-r");
+    const command = buildKeychainWriteCommand("Claude Code-credentials", "alan", secret)!;
+    assert.equal(
+      command,
+      `add-generic-password -U -s "Claude Code-credentials" -a "alan" -X ${Buffer.from(secret).toString("hex")}\n`,
+    );
+    assert.ok(!command.includes("new-r"), "token must not appear in clear text");
+  });
+
+  it("refuses names it cannot quote safely", () => {
+    assert.equal(buildKeychainWriteCommand("svc", 'a"b', "{}"), null);
+    assert.equal(buildKeychainWriteCommand("svc", "a\nb", "{}"), null);
   });
 });
 

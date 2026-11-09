@@ -9,7 +9,13 @@ import {
   refreshTokens,
   startOAuthCallbackServer,
 } from "./oauth.js";
-import { getClaudeTokens, readClaudeCredentials } from "./keychain.js";
+import type { OAuthTokens } from "./oauth.js";
+import {
+  getClaudeTokens,
+  readClaudeCliTokens,
+  writeBackClaudeCredentials,
+} from "./keychain.js";
+import type { ClaudeCliTokens, CredentialSource } from "./keychain.js";
 import {
   BETA_FLAGS,
   OAUTH_BETA_FLAG,
@@ -270,60 +276,73 @@ const oauthProfileCache = new Map<string, Promise<OAuthProfile | null>>();
 const SYSTEM_PROMPT_CACHE_PATH = process.env.ANTHROPIC_SYSTEM_PROMPT_PATH
   || join(process.env.HOME || "", ".cache", "opencode-claude-bridge", "claude-system-prompt.json");
 
+export type RefreshDeps = {
+  /** Claude CLI tokens regardless of expiry, with their store. */
+  readCli: () => ClaudeCliTokens | null;
+  refresh: (refreshToken: string) => OAuthTokens;
+  /** Compare-and-swap write-back; true when the store holds the fresh tokens. */
+  writeBack: (source: CredentialSource, spentRefreshToken: string, fresh: OAuthTokens) => boolean;
+  warn?: (message: string) => void;
+};
+
 /**
- * Layered token refresh WITHOUT persistence: valid keychain access → stored
- * refresh token → CLI refresh token. Returns the fresh token set, or null when
- * no layer produced one. Throws with the last error detail when a refresh was
- * attempted and failed. Persistence is the caller's job: the integration
- * `refresh` callback returns the tokens so opencode itself persists them.
+ * Layered token refresh: valid Claude CLI access token → stored refresh token
+ * → CLI refresh token. Returns the fresh token set, or null when no layer was
+ * available; throws the last error when every attempted refresh failed.
+ *
+ * Claude refresh tokens are single-use, and a credential imported from the
+ * CLI shares its refresh token with it. Whenever the token spent is the CLI's,
+ * the rotation is written back to the CLI store (compare-and-swap on the spent
+ * token) so the CLI isn't left holding a dead token. OpenCode persists the
+ * returned tokens itself.
  */
-function refreshTokensLayered(
+export function refreshCredentialLayered(
   auth: { refresh?: string },
-): { access: string; refresh: string; expires: number } | null {
-  type Tokens = { access: string; refresh: string; expires: number };
-  let fresh: Tokens | null = null;
-  const errors: string[] = [];
-  const attemptedRefreshTokens = new Set<string>();
-
-  const tryRefresh = (refreshToken: string | undefined): Tokens | null => {
-    if (!refreshToken || attemptedRefreshTokens.has(refreshToken)) return null;
-    attemptedRefreshTokens.add(refreshToken);
-    return refreshTokens(refreshToken);
-  };
-
-  // Layer 1: Claude CLI keychain, but only if the access token is already
-  // valid. Expired keychain refresh tokens are often stale after re-login, so
-  // do not try them before OpenCode's own stored OAuth refresh token.
-  try {
-    const kt = getClaudeTokens({ refreshExpired: false });
-    if (kt && kt.expires > Date.now() + 60_000) fresh = kt;
-  } catch (err) {
-    errors.push(String(err));
-  }
-
-  // Layer 2: Stored refresh token
-  if (!fresh && auth.refresh) {
-    try { fresh = tryRefresh(auth.refresh); }
-    catch (err) { errors.push(String(err)); }
-  }
-
-  // Layer 3: CLI refresh token, only if it differs from tokens already tried.
-  if (!fresh) {
+  deps: RefreshDeps,
+): OAuthTokens | null {
+  const strip = (t: ClaudeCliTokens): OAuthTokens => ({
+    access: t.access,
+    refresh: t.refresh,
+    expires: t.expires,
+  });
+  const readCli = (): ClaudeCliTokens | null => {
     try {
-      const creds = readClaudeCredentials();
-      if (creds?.claudeAiOauth?.refreshToken)
-        fresh = tryRefresh(creds.claudeAiOauth.refreshToken);
+      return deps.readCli();
+    } catch {
+      return null;
+    }
+  };
+  // Not a type guard: narrowing on it would turn the invalid branch into `never`.
+  const isValid = (t: OAuthTokens | null): boolean => !!t && t.expires > Date.now() + 60_000;
+
+  // Layer 1: the CLI already holds a valid access token — adopt it, no network.
+  const cli = readCli();
+  if (cli && isValid(cli)) return strip(cli);
+
+  // Layers 2 and 3: stored refresh token, then the CLI's if it differs.
+  const candidates = [...new Set([auth.refresh, cli?.refresh].filter((t): t is string => !!t))];
+  const errors: string[] = [];
+  for (const token of candidates) {
+    let fresh: OAuthTokens;
+    try {
+      fresh = deps.refresh(token);
     } catch (err) {
       errors.push(String(err));
+      // The CLI or another OpenCode may have just rotated this token; adopt
+      // its result rather than failing.
+      const again = readCli();
+      if (again && isValid(again) && again.refresh !== token) return strip(again);
+      continue;
     }
+    if (cli && token === cli.refresh && !deps.writeBack(cli.source, token, fresh)) {
+      deps.warn?.(
+        "[opencode-claude-bridge] Refreshed the Claude CLI's token but could not write it back; the Claude CLI may need `claude login`.",
+      );
+    }
+    return fresh;
   }
 
-  if (fresh) return fresh;
-
-  if (errors.length > 0) {
-    throw new Error(errors[errors.length - 1]);
-  }
-
+  if (errors.length > 0) throw new Error(errors[errors.length - 1]);
   return null;
 }
 
@@ -927,7 +946,7 @@ const OpenCodeClaudeBridge = {
           const connection = await ctx.integration.connection.active("anthropic");
           return connection ? ctx.integration.connection.resolve(connection) : undefined;
         },
-        getCliTokens: () => getClaudeTokens({ refreshExpired: false }),
+        getCliTokens: () => getClaudeTokens(),
       });
 
     // ── Auth: take over the native `oauth` method on the anthropic
@@ -940,7 +959,7 @@ const OpenCodeClaudeBridge = {
         async authorize(): Promise<OAuthAuthorization> {
           // First try: auto-bootstrap from Claude CLI keychain
           try {
-            const tokens = getClaudeTokens({ refreshExpired: false });
+            const tokens = getClaudeTokens();
             if (tokens) {
               return {
                 url: "",
@@ -1038,8 +1057,13 @@ const OpenCodeClaudeBridge = {
           // Layered refresh (keychain → stored → CLI). MUST return a promise:
           // opencode awaits it and persists the resolved credential. Never
           // refresh outside this callback — Claude refresh tokens are
-          // single-use.
-          const fresh = refreshTokensLayered(credential);
+          // single-use; spending the CLI's token writes the rotation back.
+          const fresh = refreshCredentialLayered(credential, {
+            readCli: readClaudeCliTokens,
+            refresh: refreshTokens,
+            writeBack: writeBackClaudeCredentials,
+            warn: (message) => console.error(message),
+          });
           if (!fresh) {
             throw new Error(
               "All Claude OAuth refresh layers failed. Run `claude login` or reconnect 'Claude Pro / Max (OAuth)'.",
