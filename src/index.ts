@@ -532,7 +532,8 @@ function normalizeSystemBlocks(
         text: deduplicatePrefix(
           item.text
             .replace(/OpenCode/g, "Claude Code")
-            .replace(/opencode/gi, "Claude"),
+            .replace(/\/\.config\/opencode/g, "/.claude")
+            .replace(/opencode/gi, "claude"),
         ),
       };
     }
